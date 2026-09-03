@@ -8,6 +8,11 @@ export type BrokerMessage =
     | { type: 'res'; id: number; result?: unknown; error?: { code: string; message: string } }
     | { type: 'event'; id?: number; name: string; payload: unknown };
 
+export type AuthPromptMessage = {
+    promptId: string;
+    prompt: import('./transport').AuthPrompt;
+};
+
 export function encodeFrame(message: BrokerMessage): Buffer {
     const payload = Buffer.from(JSON.stringify(message), 'utf8');
     const header = Buffer.alloc(4);

@@ -1,6 +1,7 @@
 import type { Server } from 'net';
 import type { ClientChannel, ExecOptions } from 'ssh2';
 import type { SSHTunnelConfig } from './sshConnection';
+import type { OpenSshRouteRequest } from './sshRoute';
 
 export type ExecResult = { stdout: string; stderr: string };
 
@@ -25,8 +26,6 @@ export interface ConnectionLease {
     closeTunnel(name?: string): Promise<void>;
     close(): Promise<void>;
 }
-
-import type { OpenSshRouteRequest } from './sshRoute';
 
 export interface ConnectionProvider {
     acquire(request: OpenSshRouteRequest): Promise<ConnectionLease>;

@@ -4,7 +4,7 @@ import * as ssh2 from 'ssh2';
 import { Log } from '../common/logger';
 import { isWindows } from '../common/platform';
 import { gatherIdentityFiles, SSHKey } from './identityFiles';
-import SSHConfiguration, { HostConfiguration } from './sshConfig';
+import { HostConfiguration } from './sshConfig';
 import SSHConnection, { SSHConnectConfig } from './sshConnection';
 import SSHDestination from './sshDestination';
 
@@ -21,8 +21,12 @@ export type AuthHandlerFactory = (
     preferredAuthentications: string[],
 ) => SshAuthHandler;
 
+export type HostConfigLookup = {
+    getHostConfiguration(host: string): HostConfiguration;
+};
+
 export type OpenSshRouteRequest = {
-    sshConfig: SSHConfiguration;
+    sshConfig: HostConfigLookup;
     hostConfig: HostConfiguration;
     originalHostname: string;
     host: string;

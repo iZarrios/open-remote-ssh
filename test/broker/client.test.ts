@@ -7,6 +7,26 @@ import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { BrokerClient, ProtocolMismatchError } from '../../src/broker/client';
 import { startBroker, type BrokerServer } from '../../src/broker/main';
 import { PROTOCOL_VERSION } from '../../src/broker/protocol';
+import { fakeConnectTransport } from './helpers';
+
+const route = { host: 'example.com', port: 22, user: 'alice' };
+
+function brokerOptions(runtimeDir: string, extra: Record<string, unknown> = {}) {
+    return {
+        runtimeDir,
+        uid: process.getuid(),
+        connectTransport: fakeConnectTransport(),
+        ...extra,
+    };
+}
+
+function acquireOptions(identity: string) {
+    return {
+        identity,
+        route,
+        onAuthPrompt: async () => ({ kind: 'password' as const, password: 'secret' }),
+    };
+}
 
 const dirs: string[] = [];
 const brokers: BrokerServer[] = [];
@@ -41,16 +61,16 @@ function clientOptions(runtimeDir: string) {
 describe('BrokerClient', () => {
     it('correlates concurrent requests on the control connection', async () => {
         const runtimeDir = await tempRuntime();
-        brokers.push(await startBroker({ runtimeDir, uid: process.getuid() }));
+        brokers.push(await startBroker(brokerOptions(runtimeDir)));
         const client = await BrokerClient.connect(clientOptions(runtimeDir));
 
         const [first, second] = await Promise.all([
-            client.request('acquire', { identity: 'one' }),
-            client.request('acquire', { identity: 'two' }),
+            client.acquire(acquireOptions('one')),
+            client.acquire(acquireOptions('two')),
         ]);
 
-        expect(first).toMatchObject({ identity: 'one', leaseCount: 1 });
-        expect(second).toMatchObject({ identity: 'two', leaseCount: 1 });
+        expect(first).toMatchObject({ identity: 'one' });
+        expect(second).toMatchObject({ identity: 'two' });
 
         const listed = await client.request('list') as { masters: Array<{ identity: string }> };
         expect(listed.masters.map((master) => master.identity).sort()).toEqual(['one', 'two']);
@@ -59,7 +79,7 @@ describe('BrokerClient', () => {
 
     it('leaves the running broker alive on protocol mismatch', async () => {
         const runtimeDir = await tempRuntime();
-        brokers.push(await startBroker({ runtimeDir, uid: process.getuid() }));
+        brokers.push(await startBroker(brokerOptions(runtimeDir)));
 
         await expect(BrokerClient.connect({
             ...clientOptions(runtimeDir),
@@ -73,13 +93,13 @@ describe('BrokerClient', () => {
 
     it('serializes acquire for the same identity across two clients', async () => {
         const runtimeDir = await tempRuntime();
-        brokers.push(await startBroker({ runtimeDir, uid: process.getuid() }));
+        brokers.push(await startBroker(brokerOptions(runtimeDir)));
         const a = await BrokerClient.connect(clientOptions(runtimeDir));
         const b = await BrokerClient.connect(clientOptions(runtimeDir));
 
         const [first, second] = await Promise.all([
-            a.request('acquire', { identity: 'shared' }),
-            b.request('acquire', { identity: 'shared' }),
+            a.acquire(acquireOptions('shared')),
+            b.acquire(acquireOptions('shared')),
         ]);
 
         expect(first).toMatchObject({ identity: 'shared' });
@@ -94,8 +114,7 @@ describe('BrokerClient', () => {
         const runtimeDir = await tempRuntime();
         let pausedSocket: net.Socket | undefined;
         brokers.push(await startBroker({
-            runtimeDir,
-            uid: process.getuid(),
+            ...brokerOptions(runtimeDir),
             onStream: (socket) => {
                 pausedSocket = socket;
                 socket.pause();
@@ -161,7 +180,7 @@ describe('broker child process', () => {
 
     it('connects to a live broker instead of spawning a replacement', async () => {
         const runtimeDir = await tempRuntime();
-        brokers.push(await startBroker({ runtimeDir, uid: process.getuid() }));
+        brokers.push(await startBroker(brokerOptions(runtimeDir)));
         let spawned = 0;
         const client = await BrokerClient.connect({
             runtimeDir,

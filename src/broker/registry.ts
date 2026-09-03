@@ -1,18 +1,21 @@
+import type { PersistPolicy } from '../ssh/sharingPolicy';
+import type { SharedMaster } from './master';
+
 export type MasterState = 'creating' | 'authenticating' | 'ready' | 'idle' | 'closing' | 'failed';
 
-export type MasterRecord = {
+export type MasterSummary = {
     identity: string;
     state: MasterState;
     leaseCount: number;
 };
 
 export class MasterRegistry {
-    private readonly masters = new Map<string, MasterRecord>();
-    private readonly creating = new Map<string, Promise<MasterRecord>>();
+    private readonly masters = new Map<string, SharedMaster>();
+    private readonly creating = new Map<string, Promise<SharedMaster>>();
 
-    getOrCreate(identity: string, create: () => Promise<MasterRecord>): Promise<MasterRecord> {
+    getOrCreate(identity: string, create: () => Promise<SharedMaster>): Promise<SharedMaster> {
         const existing = this.masters.get(identity);
-        if (existing) {
+        if (existing && existing.state !== 'failed' && existing.state !== 'closing') {
             return Promise.resolve(existing);
         }
 
@@ -34,15 +37,23 @@ export class MasterRegistry {
         return pending;
     }
 
-    list(): MasterRecord[] {
-        return [...this.masters.values()];
+    list(): MasterSummary[] {
+        return [...this.masters.values()].map((master) => ({
+            identity: master.identity,
+            state: master.state,
+            leaseCount: master.leaseCount,
+        }));
     }
 
-    get(identity: string): MasterRecord | undefined {
+    get(identity: string): SharedMaster | undefined {
         return this.masters.get(identity);
     }
 
     delete(identity: string): boolean {
         return this.masters.delete(identity);
     }
+}
+
+export function defaultPersist(): PersistPolicy {
+    return { kind: 'immediate' };
 }

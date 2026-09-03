@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { createMaster } from '../../src/broker/master';
 import { MasterRegistry } from '../../src/broker/registry';
+import { fakeConnection } from './helpers';
 
 describe('MasterRegistry', () => {
     it('serializes creation for the same sharing identity', async () => {
@@ -13,7 +15,7 @@ describe('MasterRegistry', () => {
         const create = async () => {
             creates += 1;
             await gate;
-            return { identity: 'a', state: 'ready' as const, leaseCount: 0 };
+            return createMaster('a', { host: 'h', port: 22, user: 'u' }, { kind: 'immediate' }, fakeConnection());
         };
 
         const first = registry.getOrCreate('a', create);
@@ -35,7 +37,7 @@ describe('MasterRegistry', () => {
             maxInFlight = Math.max(maxInFlight, inFlight);
             await Promise.resolve();
             inFlight -= 1;
-            return { identity, state: 'ready' as const, leaseCount: 0 };
+            return createMaster(identity, { host: identity, port: 22, user: 'u' }, { kind: 'immediate' }, fakeConnection());
         };
 
         await Promise.all([

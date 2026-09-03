@@ -17,7 +17,13 @@ import { isWindows } from './common/platform';
 import * as os from 'os';
 import { ServerVersion } from './serverConfig';
 import type { ConnectionLease, ConnectionProvider } from './ssh/connectionLease';
-import { DirectConnectionProvider } from './ssh/directConnectionProvider';
+import { resolveSharingPolicy } from './ssh/sharingPolicy';
+import {
+    defaultBrokerRuntimeDir,
+    defaultBrokerScript,
+    selectConnectionProvider,
+} from './ssh/brokerConnectionProvider';
+import type { AuthPrompt, AuthResponse } from './broker/transport';
 
 const PASSWORD_RETRY_COUNT = 3;
 const PASSPHRASE_RETRY_COUNT = 3;
@@ -55,7 +61,7 @@ export class RemoteSSHResolver implements vscode.RemoteAuthorityResolver, vscode
     constructor(
         readonly context: vscode.ExtensionContext,
         readonly logger: Log,
-        private readonly connectionProvider: ConnectionProvider = new DirectConnectionProvider(),
+        private readonly connectionProvider?: ConnectionProvider,
     ) {
     }
 
@@ -100,7 +106,20 @@ export class RemoteSSHResolver implements vscode.RemoteAuthorityResolver, vscode
 
                 const preferredAuthentications = sshHostConfig['PreferredAuthentications'] ? sshHostConfig['PreferredAuthentications'].split(',').map(s => s.trim()) : ['publickey', 'password', 'keyboard-interactive'];
 
-                const lease = await this.connectionProvider.acquire({
+                const sharingPolicy = resolveSharingPolicy(sshHostConfig, {
+                    host: sshHostName,
+                    port: sshPort,
+                    user: sshUser,
+                });
+                const provider = this.connectionProvider ?? selectConnectionProvider(sharingPolicy, {
+                    runtimeDir: defaultBrokerRuntimeDir(),
+                    execPath: process.execPath,
+                    brokerScript: defaultBrokerScript(this.context.extensionPath),
+                    logger: this.logger,
+                    createAuthPromptHandler: () => (prompt) => this.handleBrokerAuthPrompt(prompt),
+                });
+
+                const lease = await provider.acquire({
                     sshConfig: sshconfig,
                     hostConfig: sshHostConfig,
                     originalHostname: sshDest.hostname,
@@ -326,6 +345,52 @@ export class RemoteSSHResolver implements vscode.RemoteAuthorityResolver, vscode
         }
 
         return new TunnelInfo(localPort, remotePortOrSocketPath, disposables);
+    }
+
+    private async handleBrokerAuthPrompt(prompt: AuthPrompt): Promise<AuthResponse> {
+        if (prompt.kind === 'password') {
+            const password = await vscode.window.showInputBox({
+                title: `Enter password for ${prompt.user}@${prompt.host}`,
+                password: true,
+                ignoreFocusOut: true
+            });
+            if (password === undefined) {
+                throw new Error('Authentication cancelled');
+            }
+            return { kind: 'password', password };
+        }
+        if (prompt.kind === 'passphrase') {
+            const passphrase = await vscode.window.showInputBox({
+                title: `Enter passphrase for ${prompt.filename}`,
+                password: true,
+                ignoreFocusOut: true
+            });
+            if (passphrase === undefined) {
+                throw new Error('Authentication cancelled');
+            }
+            return { kind: 'passphrase', passphrase };
+        }
+        if (prompt.kind === 'keyboard-interactive') {
+            const answers: string[] = [];
+            for (const item of prompt.prompts) {
+                const response = await vscode.window.showInputBox({
+                    title: `(${prompt.user}@${prompt.host}) ${item.prompt}`,
+                    password: !item.echo,
+                    ignoreFocusOut: true
+                });
+                if (response === undefined) {
+                    throw new Error('Authentication cancelled');
+                }
+                answers.push(response);
+            }
+            return { kind: 'keyboard-interactive', answers };
+        }
+        const accept = await vscode.window.showErrorMessage(
+            `Host key for ${prompt.host} (${prompt.fingerprint}) is not recognized.`,
+            { modal: true },
+            'Continue',
+        );
+        return { kind: 'hostkey', accept: accept === 'Continue' };
     }
 
     private getSSHAuthHandler(sshUser: string, sshHostName: string, identityKeys: SSHKey[], preferredAuthentications: string[]) {
