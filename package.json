@@ -97,6 +97,7 @@
 		"onCommand:openremotessh.openEmptyWindowInCurrentWindow",
 		"onCommand:openremotessh.openConfigFile",
 		"onCommand:openremotessh.showLog",
+		"onCommand:openremotessh.manageSharedConnections",
 		"onResolveRemoteAuthority:ssh-remote",
 		"onView:sshHosts"
 	],
@@ -232,6 +233,11 @@
 				"category": "Remote-SSH"
 			},
 			{
+				"command": "openremotessh.manageSharedConnections",
+				"title": "Manage Shared Connections...",
+				"category": "Remote-SSH"
+			},
+			{
 				"command": "openremotessh.explorer.emptyWindowInNewWindow",
 				"title": "Connect to Host in New Window",
 				"icon": "$(empty-window)"
@@ -305,6 +311,11 @@
 					"group": "remote_20_ssh_1general@4"
 				},
 				{
+					"command": "openremotessh.manageSharedConnections",
+					"when": "remoteName =~ /^ssh-remote$/ && remoteConnectionState == connected",
+					"group": "remote_20_ssh_1general@5"
+				},
+				{
 					"command": "openremotessh.openEmptyWindow",
 					"when": "remoteConnectionState == disconnected",
 					"group": "remote_20_ssh_3local@1"
@@ -320,6 +331,11 @@
 					"group": "remote_20_ssh_3local@3"
 				},
 				{
+					"command": "openremotessh.manageSharedConnections",
+					"when": "remoteConnectionState == disconnected",
+					"group": "remote_20_ssh_3local@4"
+				},
+				{
 					"command": "openremotessh.openEmptyWindow",
 					"when": "!remoteName && !virtualWorkspace",
 					"group": "remote_20_ssh_3local@5"
@@ -333,6 +349,11 @@
 					"command": "openremotessh.openConfigFile",
 					"when": "!remoteName && !virtualWorkspace",
 					"group": "remote_20_ssh_3local@7"
+				},
+				{
+					"command": "openremotessh.manageSharedConnections",
+					"when": "!remoteName && !virtualWorkspace",
+					"group": "remote_20_ssh_3local@8"
 				}
 			],
 			"commandPalette": [

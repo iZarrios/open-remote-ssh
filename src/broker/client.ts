@@ -158,6 +158,14 @@ export class BrokerClient {
         return this.request('close-tunnel', { leaseId, identity, name }).then(() => undefined);
     }
 
+    list(): Promise<{ masters: import('./registry').MasterSummary[] }> {
+        return this.request('list') as Promise<{ masters: import('./registry').MasterSummary[] }>;
+    }
+
+    closeMaster(identity: string, options: { whenIdle?: boolean } = {}): Promise<{ closed: boolean; whenIdle?: boolean }> {
+        return this.request('close', { identity, whenIdle: options.whenIdle }) as Promise<{ closed: boolean; whenIdle?: boolean }>;
+    }
+
     close(): Promise<void> {
         this.rejectAll(new Error('Broker client closed'));
         return new Promise((resolve) => {

@@ -16,6 +16,8 @@ export type SharedMaster = {
     persist: PersistPolicy;
     connection: SSHConnection;
     leases: Map<string, BrokerLease>;
+    createdAt: number;
+    closeWhenIdle: boolean;
     idleTimer?: ReturnType<typeof setTimeout>;
 };
 
@@ -24,6 +26,7 @@ export function createMaster(
     route: FrozenRoute,
     persist: PersistPolicy,
     connection: SSHConnection,
+    now: () => number = () => Date.now(),
 ): SharedMaster {
     return {
         identity,
@@ -33,6 +36,8 @@ export function createMaster(
         persist,
         connection,
         leases: new Map(),
+        createdAt: now(),
+        closeWhenIdle: false,
     };
 }
 
@@ -67,7 +72,7 @@ export function scheduleIdleExpiry(
     if (master.leaseCount > 0) {
         return;
     }
-    if (master.persist.kind === 'immediate') {
+    if (master.closeWhenIdle || master.persist.kind === 'immediate') {
         onExpire();
         return;
     }
@@ -75,6 +80,13 @@ export function scheduleIdleExpiry(
         return;
     }
     master.idleTimer = schedule(master.persist.idleSeconds * 1000, onExpire);
+}
+
+export function markCloseWhenIdle(master: SharedMaster): void {
+    master.closeWhenIdle = true;
+    if (master.leaseCount === 0) {
+        return;
+    }
 }
 
 export function clearIdleTimer(master: SharedMaster): void {

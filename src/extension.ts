@@ -1,7 +1,12 @@
 import * as vscode from 'vscode';
 import { Log } from './common/logger';
 import { RemoteSSHResolver, REMOTE_SSH_AUTHORITY } from './authResolver';
-import { openSSHConfigFile, promptOpenRemoteSSHWindow } from './commands';
+import {
+    createManageSharedConnectionsDeps,
+    manageSharedConnections,
+    openSSHConfigFile,
+    promptOpenRemoteSSHWindow,
+} from './commands';
 import { HostTreeDataProvider } from './hostTreeView';
 import { getRemoteWorkspaceLocationData, RemoteLocationHistory } from './remoteLocationHistory';
 
@@ -27,6 +32,9 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(vscode.commands.registerCommand('openremotessh.openEmptyWindowInCurrentWindow', () => promptOpenRemoteSSHWindow(true)));
     context.subscriptions.push(vscode.commands.registerCommand('openremotessh.openConfigFile', () => openSSHConfigFile()));
     context.subscriptions.push(vscode.commands.registerCommand('openremotessh.showLog', () => logger.show()));
+    context.subscriptions.push(vscode.commands.registerCommand('openremotessh.manageSharedConnections', () =>
+        manageSharedConnections(createManageSharedConnectionsDeps({ extensionPath: context.extensionPath }))
+    ));
 }
 
 export function deactivate() {

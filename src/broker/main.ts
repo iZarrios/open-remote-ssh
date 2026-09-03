@@ -10,6 +10,7 @@ import {
     createMaster,
     detachLease,
     failMaster,
+    markCloseWhenIdle,
     scheduleIdleExpiry,
     type SharedMaster,
 } from './master';
@@ -221,12 +222,21 @@ function handleClient(
                 return { released: true };
             }
             case 'close': {
-                const identity = String((params as { identity?: string })?.identity || '');
-                const master = context.registry.get(identity);
-                if (master) {
-                    await closeMaster(master);
+                const { identity, whenIdle } = params as { identity?: string; whenIdle?: boolean };
+                const masterIdentity = String(identity || '');
+                const master = context.registry.get(masterIdentity);
+                if (!master) {
+                    return { closed: false };
                 }
-                context.registry.delete(identity);
+                if (whenIdle) {
+                    markCloseWhenIdle(master);
+                    scheduleIdleExpiry(master, () => {
+                        void closeMaster(master).finally(() => context.registry.delete(masterIdentity));
+                    }, context.schedule);
+                    return { closed: false, whenIdle: true };
+                }
+                await closeMaster(master);
+                context.registry.delete(masterIdentity);
                 return { closed: true };
             }
             case 'open-stream': {

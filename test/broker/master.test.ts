@@ -204,4 +204,67 @@ describe('broker-owned transports', () => {
         await first.client.close();
         await second.client.close();
     });
+
+    it('lists destination, age, and persist policy without secrets', async () => {
+        const runtimeDir = await tempRuntime();
+        brokers.push(await startBroker({
+            runtimeDir,
+            uid: process.getuid(),
+            connectTransport: fakeConnectTransport(),
+        }));
+        const client = await BrokerClient.connect({
+            runtimeDir,
+            execPath: process.execPath,
+            brokerScript: '',
+            spawn: () => { throw new Error('broker already running'); },
+        });
+        await client.acquire({
+            identity: 'listed',
+            route: { host: 'example.com', port: 22, user: 'alice' },
+            persist: { kind: 'indefinite' },
+            onAuthPrompt: async () => ({ kind: 'password', password: 'secret' }),
+        });
+
+        const listed = await client.list();
+        expect(listed.masters).toEqual([expect.objectContaining({
+            identity: 'listed',
+            destination: 'alice@example.com:22',
+            state: 'ready',
+            leaseCount: 1,
+            persist: { kind: 'indefinite' },
+        })]);
+        expect(listed.masters[0].ageMs).toBeGreaterThanOrEqual(0);
+        expect(JSON.stringify(listed)).not.toMatch(/secret/);
+        await client.close();
+    });
+
+    it('closes an idle master immediately and can defer closing an active master until idle', async () => {
+        const runtimeDir = await tempRuntime();
+        brokers.push(await startBroker({
+            runtimeDir,
+            uid: process.getuid(),
+            connectTransport: fakeConnectTransport(),
+        }));
+        const client = await BrokerClient.connect({
+            runtimeDir,
+            execPath: process.execPath,
+            brokerScript: '',
+            spawn: () => { throw new Error('broker already running'); },
+        });
+        const lease = await client.acquire({
+            identity: 'managed',
+            route: { host: 'example.com', port: 22, user: 'alice' },
+            persist: { kind: 'indefinite' },
+            onAuthPrompt: async () => ({ kind: 'password', password: 'secret' }),
+        });
+
+        await client.closeMaster('managed', { whenIdle: true });
+        await expect(client.list()).resolves.toEqual({
+            masters: [expect.objectContaining({ identity: 'managed', leaseCount: 1 })],
+        });
+
+        await client.release(lease.leaseId, lease.identity);
+        await expect(client.list()).resolves.toEqual({ masters: [] });
+        await client.close();
+    });
 });
