@@ -8,10 +8,13 @@ const webpack = require('webpack');
 /**@type {import('webpack').Configuration}*/
 const config = {
     target: 'node',
-    entry: './src/extension.ts',
+    entry: {
+        extension: './src/extension.ts',
+        connectionBroker: './src/broker/main.ts',
+    },
     output: {
         path: path.resolve(__dirname, 'lib'),
-        filename: 'extension.js',
+        filename: '[name].js',
         libraryTarget: "commonjs2",
         devtoolModuleFilenameTemplate: "../[resource-path]",
     },
