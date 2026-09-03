@@ -53,6 +53,9 @@ const SSH_CONFIG_PROPERTIES: Record<string, string> = {
     'proxyjump': 'ProxyJump',
     'proxycommand': 'ProxyCommand',
     'include': 'Include',
+    'controlmaster': 'ControlMaster',
+    'controlpath': 'ControlPath',
+    'controlpersist': 'ControlPersist',
 };
 
 function normalizeProp(prop: Directive) {
@@ -136,6 +139,7 @@ export default class SSHConfiguration {
     }
 
     constructor(private sshConfig: SSHConfig) {
+        normalizeSSHConfig(sshConfig);
     }
 
     getAllConfiguredHosts(): string[] {
