@@ -4,6 +4,11 @@
 ./dockerfiles/build.sh
 ```
 
+Images:
+
+- `local-ubuntu-bash` / `local-alpine-bash` / `local-ubuntu-fish` / `local-ubuntu-noflock` — general fixture hosts
+- `local-ubuntu-mfa` — keyboard-interactive-only target with an independent auth counter (`/var/run/ssh-auth-count` and sshd `Accepted` logs) for issue #206 sharing e2e
+
 ### Debugging Image
 
 ### Run Image in Interactive Mode
