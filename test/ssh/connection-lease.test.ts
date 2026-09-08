@@ -19,7 +19,7 @@ function createFakeTransport() {
         addTunnel: async (config: SSHTunnelConfig): Promise<TunnelHandle> => {
             const name = config.name || 'tunnel';
             tunnels.add(name);
-            return { ...config, name, server: {} as TunnelHandle['server'] };
+            return { ...config, name };
         },
         closeTunnel: async (name?: string) => {
             if (name) {

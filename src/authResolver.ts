@@ -338,7 +338,9 @@ export class RemoteSSHResolver implements vscode.RemoteAuthorityResolver, vscode
             });
             disposables.push({
                 dispose: () => {
-                    this.lease?.closeTunnel(tunnelConfig.name);
+                    void this.lease?.closeTunnel(tunnelConfig.name).catch((err) => {
+                        this.logger.error(`Failed to close tunnel ${tunnelConfig.name}`, err);
+                    });
                     this.logger.trace(`Tunnel ${tunnelConfig.name} closed`);
                 }
             });
@@ -527,7 +529,9 @@ export class RemoteSSHResolver implements vscode.RemoteAuthorityResolver, vscode
         disposeAll(this.tunnels);
         this.agentForwardSession?.close();
         this.agentForwardSession = undefined;
-        this.lease?.close();
+        void this.lease?.close().catch((err) => {
+            this.logger.error('Failed to release SSH connection lease', err);
+        });
         this.lease = undefined;
         this.labelFormatterDisposable?.dispose();
     }

@@ -20,6 +20,10 @@ export type SharingIdentity = {
     user: string;
 };
 
+export function sharingIdentityKey(identity: SharingIdentity): string {
+    return `${identity.controlPath}|${identity.host}|${identity.port}|${identity.user}`;
+}
+
 export type DirectSharingReason =
     | 'absent'
     | 'none-path'
@@ -103,7 +107,7 @@ export function resolveSharingPolicy(
         };
     }
 
-    const expanded = expandControlPath(controlPath, destination, options);
+    const expanded = expandControlPath(controlPath, destination, config.ProxyJump || '', options);
     if (!expanded.ok) {
         return {
             sharing: false,
@@ -201,6 +205,7 @@ function parseOpenSSHTime(value: string): number | undefined {
 function expandControlPath(
     controlPath: string,
     destination: SharingDestination,
+    jumpHost: string,
     options: ResolveSharingPolicyOptions,
 ): { ok: true; value: string } | { ok: false; token: string } {
     const homedir = options.homedir ?? os.homedir();
@@ -221,7 +226,7 @@ function expandControlPath(
             return { ok: false, token: `%${token}` };
         }
         i += 1;
-        result += expandToken(token, destination, options);
+        result += expandToken(token, destination, jumpHost, options);
     }
     return { ok: true, value: result };
 }
@@ -229,6 +234,7 @@ function expandControlPath(
 function expandToken(
     token: string,
     destination: SharingDestination,
+    jumpHost: string,
     options: ResolveSharingPolicyOptions,
 ): string {
     switch (token) {
@@ -244,7 +250,7 @@ function expandToken(
             const localHostname = options.localHostname ?? os.hostname();
             return crypto
                 .createHash('sha1')
-                .update(`${localHostname}${destination.host}${destination.port}${destination.user}`)
+                .update(`${localHostname}${destination.host}${destination.port}${destination.user}${jumpHost}`)
                 .digest('hex');
         }
         default:

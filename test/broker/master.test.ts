@@ -88,6 +88,66 @@ describe('broker-owned transports', () => {
         await client.close();
     });
 
+    it('releases a client lease when its control connection closes', async () => {
+        const runtimeDir = await tempRuntime();
+        brokers.push(await startBroker({
+            runtimeDir,
+            uid: process.getuid(),
+            connectTransport: fakeConnectTransport(),
+        }));
+        const first = await BrokerClient.connect({
+            runtimeDir,
+            execPath: process.execPath,
+            brokerScript: '',
+            spawn: () => { throw new Error('broker already running'); },
+        });
+        await first.acquire({
+            identity: 'survives-client',
+            route: { host: 'example.com', port: 22, user: 'alice' },
+            persist: { kind: 'indefinite' },
+            onAuthPrompt: async () => ({ kind: 'password', password: 'secret' }),
+        });
+
+        await first.close();
+
+        const second = await BrokerClient.connect({
+            runtimeDir,
+            execPath: process.execPath,
+            brokerScript: '',
+            spawn: () => { throw new Error('broker already running'); },
+        });
+        await expect(second.list()).resolves.toEqual({
+            masters: [expect.objectContaining({ identity: 'survives-client', leaseCount: 0, state: 'idle' })],
+        });
+        await second.closeMaster('survives-client');
+        await second.close();
+    });
+
+    it('stops the broker when the final immediate master and client close', async () => {
+        const runtimeDir = await tempRuntime();
+        const broker = await startBroker({
+            runtimeDir,
+            uid: process.getuid(),
+            connectTransport: fakeConnectTransport(),
+        });
+        brokers.push(broker);
+        const client = await BrokerClient.connect({
+            runtimeDir,
+            execPath: process.execPath,
+            brokerScript: '',
+            spawn: () => { throw new Error('broker already running'); },
+        });
+        await client.acquire({
+            identity: 'last-master',
+            route: { host: 'example.com', port: 22, user: 'alice' },
+            persist: { kind: 'immediate' },
+            onAuthPrompt: async () => ({ kind: 'password', password: 'secret' }),
+        });
+
+        await client.close();
+        await expect(broker.closed).resolves.toBeUndefined();
+    });
+
     it('keeps the master until a timed persist idle window expires', async () => {
         const runtimeDir = await tempRuntime();
         const timers: Array<{ delay: number; fn: () => void }> = [];
@@ -197,9 +257,7 @@ describe('broker-owned transports', () => {
 
         await expect(first.client.exec(first.lease.leaseId, first.lease.identity, 'uname')).rejects.toThrow(/transport failed/i);
         await expect(second.client.exec(second.lease.leaseId, second.lease.identity, 'uname')).rejects.toThrow(/transport failed/i);
-        await expect(first.client.request('list')).resolves.toEqual({
-            masters: [expect.objectContaining({ identity: 'shared', state: 'failed' })],
-        });
+        await expect(first.client.request('list')).resolves.toEqual({ masters: [] });
 
         await first.client.close();
         await second.client.close();

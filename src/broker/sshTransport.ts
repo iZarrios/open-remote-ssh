@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as ssh2 from 'ssh2';
+import type { ParsedKey } from 'ssh2-streams';
 import { gatherIdentityFiles } from '../ssh/identityFiles';
 import SSHConnection from '../ssh/sshConnection';
 import { openSshRoute, type HostConfigLookup, type SshAuthHandler } from '../ssh/sshRoute';
@@ -47,12 +48,13 @@ export const connectSshTransport: TransportConnector = async (_identity, route, 
         sshAgentSock: route.sshAgentSock,
         preferredAuthentications: preferred,
         createAuthHandler: (user: string, host: string, keys: typeof identityKeys, authentications: string[]) =>
-            authHandlerFromDelegate(auth, user, host, keys, authentications),
+            createBrokerAuthHandler(auth, user, host, keys, authentications, route.sshAgentSock),
         logger: logger as never,
     };
 
     const opened = await openSshRoute(request);
     try {
+        const authHandler = request.createAuthHandler(route.user, route.host, identityKeys, preferred);
         const connection = new SSHConnection({
             host: opened.host,
             port: opened.port,
@@ -68,11 +70,7 @@ export const connectSshTransport: TransportConnector = async (_identity, route, 
                     () => callback(false),
                 );
             },
-            authHandler: (arg0, arg1, arg2) => {
-                const handler = request.createAuthHandler(route.user, route.host, identityKeys, preferred);
-                void handler(arg0, arg1, arg2);
-                return undefined;
-            },
+            authHandler: (arg0, arg1, arg2) => (authHandler(arg0, arg1, arg2), undefined),
         });
         await connection.connect();
         const close = connection.close.bind(connection);
@@ -87,14 +85,16 @@ export const connectSshTransport: TransportConnector = async (_identity, route, 
     }
 };
 
-function authHandlerFromDelegate(
+export function createBrokerAuthHandler(
     auth: AuthDelegate,
     user: string,
     host: string,
     identityKeys: Awaited<ReturnType<typeof gatherIdentityFiles>>,
     preferredAuthentications: string[],
+    sshAgentSock?: string,
 ): SshAuthHandler {
     let passwordRetryCount = 3;
+    let keyboardRetryCount = 3;
     const keys = identityKeys.slice();
     return async (methodsLeft, _partialSuccess, callback) => {
         if (methodsLeft === null) {
@@ -102,8 +102,22 @@ function authHandlerFromDelegate(
         }
         if (methodsLeft.includes('publickey') && keys.length && preferredAuthentications.includes('publickey')) {
             const identityKey = keys.shift()!;
-            if (identityKey.parsedKey && identityKey.isPrivate) {
-                return callback({ type: 'publickey', username: user, key: identityKey.parsedKey });
+            if (identityKey.parsedKey) {
+                if (identityKey.agentSupport && sshAgentSock) {
+                    const { parsedKey } = identityKey;
+                    return callback({
+                        type: 'agent',
+                        username: user,
+                        agent: new class extends ssh2.OpenSSHAgent {
+                            override getIdentities(callback: (err: Error | undefined, publicKeys?: ParsedKey[]) => void): void {
+                                callback(undefined, [parsedKey]);
+                            }
+                        }(sshAgentSock),
+                    });
+                }
+                if (identityKey.isPrivate) {
+                    return callback({ type: 'publickey', username: user, key: identityKey.parsedKey });
+                }
             }
             try {
                 const keyBuffer = await fs.promises.readFile(identityKey.filename);
@@ -126,7 +140,8 @@ function authHandlerFromDelegate(
             passwordRetryCount -= 1;
             return callback({ type: 'password', username: user, password });
         }
-        if (methodsLeft.includes('keyboard-interactive') && preferredAuthentications.includes('keyboard-interactive')) {
+        if (methodsLeft.includes('keyboard-interactive') && keyboardRetryCount > 0 && preferredAuthentications.includes('keyboard-interactive')) {
+            keyboardRetryCount -= 1;
             return callback({
                 type: 'keyboard-interactive',
                 username: user,

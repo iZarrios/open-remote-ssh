@@ -1,11 +1,10 @@
-import type { Server } from 'net';
 import type { ClientChannel, ExecOptions } from 'ssh2';
 import type { SSHTunnelConfig } from './sshConnection';
 import type { OpenSshRouteRequest } from './sshRoute';
 
 export type ExecResult = { stdout: string; stderr: string };
 
-export type TunnelHandle = SSHTunnelConfig & { server: Server };
+export type TunnelHandle = SSHTunnelConfig;
 
 /**
  * Temporary right to use an SSH transport. Releasing the lease closes channels,

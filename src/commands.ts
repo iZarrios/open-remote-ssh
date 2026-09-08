@@ -1,14 +1,14 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
+import * as os from 'os';
 import { getRemoteAuthority } from './authResolver';
 import SSHConfiguration, { getSSHConfigPath } from './ssh/sshConfig';
 import { exists as fileExists } from './common/files';
 import SSHDestination from './ssh/sshDestination';
 import { BrokerClient } from './broker/client';
-import type { PersistPolicy } from './ssh/sharingPolicy';
+import { resolveSharingPolicy, sharingIdentityKey, type PersistPolicy } from './ssh/sharingPolicy';
 import {
     defaultBrokerRuntimeDir,
-    defaultBrokerScript,
 } from './ssh/brokerConnectionProvider';
 
 export type SharedConnectionInfo = {
@@ -20,16 +20,21 @@ export type SharedConnectionInfo = {
     persist: PersistPolicy;
 };
 
+export type SharedConnectionListEntry =
+    | { kind: 'active'; connection: SharedConnectionInfo }
+    | { kind: 'configured'; host: string; destination: string };
+
 export type SharedConnectionPickItem = {
     label: string;
     description?: string;
     detail?: string;
-    connection: SharedConnectionInfo;
+    entry: SharedConnectionListEntry;
 };
 
 export type ManageSharedConnectionsDeps = {
-    list(): Promise<SharedConnectionInfo[]>;
+    list(): Promise<SharedConnectionListEntry[]>;
     close(identity: string, options: { whenIdle: boolean }): Promise<void>;
+    openHostInNewWindow(host: string): Promise<void> | void;
     showQuickPick(items: SharedConnectionPickItem[]): Promise<SharedConnectionPickItem | undefined> | Thenable<SharedConnectionPickItem | undefined>;
     showWarningMessage(message: string, ...actions: string[]): Promise<string | undefined> | Thenable<string | undefined>;
     showInformationMessage(message: string): Promise<string | undefined> | Thenable<string | undefined>;
@@ -62,23 +67,65 @@ export function toSharedConnectionPickItem(connection: SharedConnectionInfo): Sh
         label: connection.destination,
         description: `${connection.state} · ${connection.leaseCount} lease${connection.leaseCount === 1 ? '' : 's'}`,
         detail: `age ${formatAge(connection.ageMs)} · ${formatPersist(connection.persist)}`,
-        connection,
+        entry: { kind: 'active', connection },
     };
 }
 
+function toPickItem(entry: SharedConnectionListEntry): SharedConnectionPickItem {
+    if (entry.kind === 'active') {
+        return toSharedConnectionPickItem(entry.connection);
+    }
+    return {
+        label: entry.host,
+        description: 'Start shared connection',
+        detail: entry.destination,
+        entry,
+    };
+}
+
+export function configuredSharedHosts(
+    config: Pick<SSHConfiguration, 'getAllConfiguredHosts' | 'getHostConfiguration'>,
+    activeIdentities: ReadonlySet<string>,
+    username: string = os.userInfo().username,
+): SharedConnectionListEntry[] {
+    const configured: SharedConnectionListEntry[] = [];
+    for (const host of config.getAllConfiguredHosts()) {
+        const hostConfig = config.getHostConfiguration(host);
+        const destination = {
+            host: hostConfig.HostName?.replace('%h', host) ?? host,
+            port: hostConfig.Port ? parseInt(hostConfig.Port, 10) : 22,
+            user: hostConfig.User || username || '',
+        };
+        const policy = resolveSharingPolicy(hostConfig, destination);
+        if (policy.sharing && policy.action !== 'attach' && !activeIdentities.has(sharingIdentityKey(policy.identity))) {
+            configured.push({
+                kind: 'configured',
+                host,
+                destination: `${destination.user}@${destination.host}:${destination.port}`,
+            });
+        }
+    }
+    return configured;
+}
+
 export async function manageSharedConnections(deps: ManageSharedConnectionsDeps): Promise<void> {
-    const masters = await deps.list();
-    if (!masters.length) {
-        await deps.showInformationMessage('No shared SSH connections.');
+    const entries = await deps.list();
+    if (!entries.length) {
+        await deps.showInformationMessage('No active or configured shared SSH connections.');
         return;
     }
 
-    const selected = await deps.showQuickPick(masters.map(toSharedConnectionPickItem));
+    const selected = await deps.showQuickPick(entries.map(toPickItem));
     if (!selected) {
         return;
     }
 
-    const { connection } = selected;
+    if (selected.entry.kind === 'configured') {
+        await deps.openHostInNewWindow(selected.entry.host);
+        return;
+    }
+
+    const { connection } = selected.entry;
     if (connection.leaseCount === 0) {
         await deps.close(connection.identity, { whenIdle: false });
         return;
@@ -99,35 +146,44 @@ export async function manageSharedConnections(deps: ManageSharedConnectionsDeps)
 }
 
 export function createManageSharedConnectionsDeps(options: {
-    extensionPath: string;
-    connectBroker?: () => Promise<BrokerClient>;
-}): ManageSharedConnectionsDeps {
-    const connect = options.connectBroker ?? (() => BrokerClient.connect({
+    connectBroker?: () => Promise<BrokerClient | undefined>;
+} = {}): ManageSharedConnectionsDeps {
+    const connect = options.connectBroker ?? (() => BrokerClient.connectExisting({
         runtimeDir: defaultBrokerRuntimeDir(),
-        execPath: process.execPath,
-        brokerScript: defaultBrokerScript(options.extensionPath),
-        detached: true,
     }));
 
     return {
         async list() {
-            const client = await connect();
+            const [client, config] = await Promise.all([
+                connect(),
+                SSHConfiguration.loadFromFS(),
+            ]);
+            let masters: SharedConnectionInfo[];
             try {
-                const result = await client.list();
-                return result.masters.map((master) => ({
+                const result = await client?.list();
+                masters = result?.masters.map((master) => ({
                     identity: master.identity,
                     destination: master.destination,
                     state: master.state,
                     leaseCount: master.leaseCount,
                     ageMs: master.ageMs,
                     persist: master.persist,
-                }));
+                })) ?? [];
             } finally {
-                await client.close();
+                await client?.close();
             }
+            const activeIdentities = new Set(masters.map((master) => master.identity));
+            const configured = configuredSharedHosts(config, activeIdentities);
+            return [
+                ...masters.map((connection): SharedConnectionListEntry => ({ kind: 'active', connection })),
+                ...configured,
+            ];
         },
         async close(identity, closeOptions) {
             const client = await connect();
+            if (!client) {
+                return;
+            }
             try {
                 await client.closeMaster(identity, closeOptions);
             } finally {
@@ -137,8 +193,12 @@ export function createManageSharedConnectionsDeps(options: {
         showQuickPick(items) {
             return vscode.window.showQuickPick(items, {
                 title: 'Manage Shared Connections',
-                placeHolder: 'Select a shared SSH connection to close',
+                placeHolder: 'Select a connection to start or close',
             });
+        },
+        openHostInNewWindow(host) {
+            const destination = new SSHDestination(host);
+            openRemoteSSHWindow(destination.toEncodedString(), false);
         },
         showWarningMessage(message, ...actions) {
             return vscode.window.showWarningMessage(message, { modal: true }, ...actions);

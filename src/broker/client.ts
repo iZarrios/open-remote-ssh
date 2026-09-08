@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess, type SpawnOptions } from 'child_process';
 import * as net from 'net';
+import type { ClientChannel, ExecOptions } from 'ssh2';
 import type { PersistPolicy, SharingAction } from '../ssh/sharingPolicy';
 import { attachFrameReader, encodeFrame, PROTOCOL_VERSION, type BrokerMessage } from './protocol';
 import { controlSocketPath } from './runtime';
@@ -98,6 +99,21 @@ export class BrokerClient {
         }
     }
 
+    static async connectExisting(options: Pick<ConnectBrokerOptions, 'runtimeDir' | 'helloVersion'>): Promise<BrokerClient | undefined> {
+        const socket = await tryConnect(controlSocketPath(options.runtimeDir));
+        if (!socket) {
+            return undefined;
+        }
+        const client = new BrokerClient(socket);
+        try {
+            await client.handshake(options.helloVersion ?? PROTOCOL_VERSION);
+            return client;
+        } catch (err) {
+            await client.close();
+            throw err;
+        }
+    }
+
     request(method: string, params: unknown = {}): Promise<unknown> {
         const id = this.nextId++;
         return new Promise((resolve, reject) => {
@@ -132,8 +148,8 @@ export class BrokerClient {
         return this.request('release', { leaseId, identity }).then(() => undefined);
     }
 
-    exec(leaseId: string, identity: string, cmd: string, params?: Array<string>): Promise<{ stdout: string; stderr: string }> {
-        return this.request('exec', { leaseId, identity, cmd, params }) as Promise<{ stdout: string; stderr: string }>;
+    exec(leaseId: string, identity: string, cmd: string, params?: Array<string>, options?: ExecOptions): Promise<{ stdout: string; stderr: string }> {
+        return this.request('exec', { leaseId, identity, cmd, params, options }) as Promise<{ stdout: string; stderr: string }>;
     }
 
     execPartial(
@@ -142,12 +158,86 @@ export class BrokerClient {
         cmd: string,
         tester: (stdout: string, stderr: string) => boolean,
         params?: Array<string>,
+        options?: ExecOptions,
     ): Promise<{ stdout: string; stderr: string }> {
-        return this.request('exec-partial', { leaseId, identity, cmd, params }).then(async (result) => {
-            const output = result as { stdout: string; stderr: string };
-            tester(output.stdout, output.stderr);
-            return output;
+        const command = cmd + (Array.isArray(params) ? ` ${params.join(' ')}` : '');
+        return this.execChannel(leaseId, identity, command, options).then((channel) => new Promise((resolve, reject) => {
+            let stdout = '';
+            let stderr = '';
+            let resolved = false;
+            const finish = () => {
+                if (resolved) {
+                    return;
+                }
+                resolved = true;
+                resolve({ stdout, stderr });
+            };
+            const test = () => {
+                if (tester(stdout, stderr)) {
+                    finish();
+                }
+            };
+            channel.on('data', (data: Buffer | string) => {
+                stdout += data.toString();
+                test();
+            });
+            channel.stderr.on('data', (data: Buffer | string) => {
+                stderr += data.toString();
+                test();
+            });
+            channel.once('close', finish);
+            channel.once('error', reject);
+        }));
+    }
+
+    async execChannel(
+        leaseId: string,
+        identity: string,
+        cmd: string,
+        options?: ExecOptions,
+    ): Promise<ClientChannel> {
+        const result = await this.request('exec-channel', { leaseId, identity, cmd, options }) as {
+            socketPath: string;
+            stderrSocketPath: string;
+        };
+        const [channelSocket, stderrSocket] = await Promise.all([
+            connectDataSocket(result.socketPath),
+            connectDataSocket(result.stderrSocketPath),
+        ]);
+        const close = () => {
+            channelSocket.destroy();
+            stderrSocket.destroy();
+        };
+        Object.defineProperties(channelSocket, {
+            stderr: { value: stderrSocket, enumerable: true },
+            close: { value: close },
+            eof: { value: () => channelSocket.end() },
         });
+        return channelSocket as unknown as ClientChannel;
+    }
+
+    async forwardOut(
+        leaseId: string,
+        identity: string,
+        srcIP: string,
+        srcPort: number,
+        destIP: string,
+        destPort: number,
+    ): Promise<ClientChannel> {
+        const result = await this.request('forward-out', {
+            leaseId,
+            identity,
+            srcIP,
+            srcPort,
+            destIP,
+            destPort,
+        }) as { socketPath: string };
+        const socket = await connectDataSocket(result.socketPath);
+        Object.defineProperties(socket, {
+            close: { value: () => socket.destroy() },
+            eof: { value: () => socket.end() },
+        });
+        return socket as unknown as ClientChannel;
     }
 
     addTunnel(leaseId: string, identity: string, config: unknown): Promise<{ name: string; localPort?: number }> {
@@ -257,6 +347,7 @@ function launchBroker(options: ConnectBrokerOptions): void {
         stdio: 'ignore',
         env: {
             ...process.env,
+            ELECTRON_RUN_AS_NODE: '1',
             OPEN_REMOTE_SSH_BROKER_RUNTIME: options.runtimeDir,
         },
     });
@@ -291,4 +382,12 @@ async function waitForConnect(socketPath: string, timeoutMs: number): Promise<ne
         await new Promise((resolve) => setTimeout(resolve, 20));
     }
     throw new Error(`Timed out waiting for broker at ${socketPath}`);
+}
+
+function connectDataSocket(socketPath: string): Promise<net.Socket> {
+    return new Promise((resolve, reject) => {
+        const socket = net.connect(socketPath);
+        socket.once('connect', () => resolve(socket));
+        socket.once('error', reject);
+    });
 }

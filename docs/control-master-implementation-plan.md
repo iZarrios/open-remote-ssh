@@ -37,7 +37,7 @@ Each slice is test-first: add one failing behavior test, implement the smallest 
   - `yes`: do not attach first; create a new master, but continue unshared if the identity is occupied.
   - `ask` and `autoask`: warn and connect directly because interactive mux approval is unsupported.
 - Parse `ControlPersist no`, durations, and `yes`/`0`.
-- Expand `ControlPath` tokens `~`, `%%`, `%h`, `%p`, `%r`, and `%C`. Reject unsupported tokens and use a direct connection with a warning.
+- Expand `ControlPath` tokens `~`, `%%`, `%h`, `%p`, `%r`, and `%C`. Include `ProxyJump` in `%C`, matching OpenSSH's connection hash. Reject unsupported tokens and use a direct connection with a warning.
 - Key the broker registry by expanded `ControlPath` plus resolved host, port, and user. Freeze route/auth/agent configuration when creating the master.
 - On Windows, retain current direct behavior and log that sharing is unsupported.
 
@@ -58,6 +58,7 @@ Tests: run existing fixtures through the direct provider and prove resolver disp
 - Bundle `main.ts` as `lib/connectionBroker.js` via a second webpack entry and include it in `.vscodeignore` packaging rules.
 - Launch it on demand with the editor-provided Node/Electron runtime, detached from the requesting window.
 - Use one per-user broker with a registry of many masters. Serialize creation per sharing identity so concurrent first clients cannot both authenticate.
+- Exit the broker immediately when its registry is empty and no extension consumers remain. Timed or indefinite idle masters keep the registry non-empty until they expire or are explicitly closed.
 - Use an exact protocol-version hello. On mismatch, leave the old broker alive for current leases and let the new client connect directly.
 - Place IPC below a private, current-user-owned `0700` runtime directory. Reject symlinks, wrong ownership, or permissive modes. Create restrictive Unix sockets and safely distinguish a live endpoint from a stale one before unlinking.
 - Put requests, responses, authentication prompts, errors, and lifecycle events on the control connection. Use a new temporary Unix data socket for each byte stream; the broker owns forwarding listeners and returns their local addresses.
@@ -80,10 +81,12 @@ Tests: two broker clients share one fake authenticated transport; the second get
 ### 5. Management command
 
 - Add `Remote-SSH: Manage Shared Connections...` to `package.json`, `src/commands.ts`, and `src/extension.ts`.
-- List destination, state, lease count, age, and persistence policy without exposing secrets.
+- List active shared transports and every inactive configured host whose policy can create a master (`auto` or `yes`) and has a valid `ControlPath`, without exposing secrets. Show destination, state, lease count, age, and persistence policy for active entries.
+- Selecting an eligible inactive host immediately opens it in a new remote VSCodium window through the ordinary connection flow. The resolver in that window starts the broker if necessary, performs authentication through VSCodium, and owns the initial lease; the management command does not create a bootstrap lease or replace the current workspace.
+- This direct handoff supports `ControlPersist no` without a race or hidden lease and never overrides the configured policy.
 - Closing an idle master is immediate. Closing an active master requires confirmation naming the affected lease count, then disconnects those leases like OpenSSH `ssh -O exit`. Optionally offer “close when idle” as a convenience.
 
-Tests: command-level tests for listing, idle close, cancellation, and confirmed active close.
+Tests: command-level tests for active/inactive listing, eligible-host filtering, remote-window handoff, `ControlPersist no`, idle close, and confirmed active close. Resolver integration tests cover broker startup and authentication after the handoff.
 
 ### 6. Reproduce issue #206 end to end
 
@@ -111,4 +114,4 @@ Inspect the produced VSIX to confirm both bundles are present. Verify no version
 
 ## PR boundaries
 
-Keep the final PR focused on issue #206. Avoid unrelated `SSHConnection` cleanup. If review size becomes a concern, land slice 2 as a behavior-preserving preparatory PR only after the maintainer agrees; the user-visible sharing feature and its end-to-end MFA test should otherwise land together.
+Keep this as one complete PR focused on issue #206, including the user-visible sharing feature and its end-to-end MFA test. Avoid unrelated `SSHConnection` cleanup. Local commits are allowed while preparing the work, but the agent must never push them; publishing remains a user action.

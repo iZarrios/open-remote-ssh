@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import { fork, spawnSync, type ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -59,6 +59,50 @@ async function connectClient() {
         brokerScript: '',
         spawn: () => { throw new Error('broker already running'); },
     });
+}
+
+type ProcessResponse<T> = { id: number; result?: T; error?: string };
+
+class ProcessBrokerClient {
+    private nextId = 1;
+
+    private constructor(private readonly child: ChildProcess) {}
+
+    static async connect(): Promise<ProcessBrokerClient> {
+        const child = fork(path.join(__dirname, 'fixtures/client-process.mjs'), [], {
+            env: { ...process.env, ORSS_TEST_PASSWORD: PASSWORD },
+            stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
+        });
+        const client = new ProcessBrokerClient(child);
+        await client.request('connect', { runtimeDir });
+        return client;
+    }
+
+    request<T>(method: string, payload: Record<string, unknown> = {}): Promise<T> {
+        const id = this.nextId++;
+        return new Promise<T>((resolve, reject) => {
+            const onMessage = (response: ProcessResponse<T>) => {
+                if (response.id !== id) {
+                    return;
+                }
+                this.child.off('message', onMessage);
+                if (response.error) {
+                    reject(new Error(response.error));
+                } else {
+                    resolve(response.result as T);
+                }
+            };
+            this.child.on('message', onMessage);
+            this.child.send({ id, method, ...payload });
+        });
+    }
+
+    async close(): Promise<void> {
+        if (this.child.connected) {
+            await this.request('close').catch(() => undefined);
+            this.child.disconnect();
+        }
+    }
 }
 
 function jumpRoute(): FrozenRoute {
@@ -179,47 +223,55 @@ afterAll(async () => {
 describe('issue #206 end-to-end connection sharing', () => {
     it('shares one ProxyJump MFA transport across two broker clients', async () => {
         const identity = `proxyjump-mfa-${randomUUID()}`;
-        const firstPrompts = { count: 0, kinds: [] as string[] };
-        const secondPrompts = { count: 0, kinds: [] as string[] };
         const before = dockerAuthCount();
 
-        const firstClient = await connectClient();
-        let secondClient: BrokerClient | undefined;
+        const firstClient = await ProcessBrokerClient.connect();
+        let secondClient: ProcessBrokerClient | undefined;
         try {
-            const firstLease = await firstClient.acquire({
-                identity,
-                route: jumpRoute(),
-                persist: { kind: 'indefinite' },
-                onAuthPrompt: authHandler(firstPrompts),
+            const first = await firstClient.request<{
+                lease: { leaseId: string };
+                promptKinds: string[];
+            }>('acquire', {
+                options: { identity, route: jumpRoute(), persist: { kind: 'indefinite' } },
             });
 
-            expect(firstPrompts.kinds).toContain('password');
-            expect(firstPrompts.kinds).toContain('keyboard-interactive');
+            expect(first.promptKinds).toContain('password');
+            expect(first.promptKinds).toContain('keyboard-interactive');
             expect(dockerAuthCount()).toBe(before + 1);
 
-            secondClient = await connectClient();
-            const secondLease = await secondClient.acquire({
-                identity,
-                route: jumpRoute(),
-                persist: { kind: 'indefinite' },
-                onAuthPrompt: authHandler(secondPrompts),
+            secondClient = await ProcessBrokerClient.connect();
+            const second = await secondClient.request<{
+                lease: { leaseId: string };
+                promptKinds: string[];
+            }>('acquire', {
+                options: { identity, route: jumpRoute(), persist: { kind: 'indefinite' } },
             });
 
-            expect(secondPrompts.count).toBe(0);
+            expect(second.promptKinds).toEqual([]);
             expect(dockerAuthCount()).toBe(before + 1);
 
-            await expect(firstClient.exec(firstLease.leaseId, identity, 'echo', ['jump-share'])).resolves.toEqual({
+            await expect(firstClient.request('exec', {
+                leaseId: first.lease.leaseId,
+                identity,
+                command: 'echo',
+                params: ['jump-share'],
+            })).resolves.toEqual({
                 stdout: 'jump-share\n',
                 stderr: '',
             });
-            await expect(secondClient.exec(secondLease.leaseId, identity, 'echo', ['jump-share-2'])).resolves.toEqual({
+            await expect(secondClient.request('exec', {
+                leaseId: second.lease.leaseId,
+                identity,
+                command: 'echo',
+                params: ['jump-share-2'],
+            })).resolves.toEqual({
                 stdout: 'jump-share-2\n',
                 stderr: '',
             });
             expect(dockerAuthCount()).toBe(before + 1);
 
-            await firstClient.release(firstLease.leaseId, identity);
-            await secondClient.release(secondLease.leaseId, identity);
+            await firstClient.request('release', { leaseId: first.lease.leaseId, identity });
+            await secondClient.request('release', { leaseId: second.lease.leaseId, identity });
         } finally {
             await firstClient.close().catch(() => undefined);
             await secondClient?.close().catch(() => undefined);

@@ -8,7 +8,7 @@ import {
     BrokerRequestError,
     ProtocolMismatchError,
 } from '../broker/client';
-import type { PersistPolicy, SharingAction, SharingPolicy, SharedSharingPolicy } from './sharingPolicy';
+import { sharingIdentityKey, type PersistPolicy, type SharingAction, type SharingPolicy, type SharedSharingPolicy } from './sharingPolicy';
 import type { ConnectionLease, ConnectionProvider, TunnelHandle } from './connectionLease';
 import { DirectConnectionProvider } from './directConnectionProvider';
 import type { OpenSshRouteRequest } from './sshRoute';
@@ -81,12 +81,13 @@ export class BrokerConnectionProvider implements ConnectionProvider {
     }
 
     async acquire(request: OpenSshRouteRequest): Promise<ConnectionLease> {
+        let client: BrokerClient | undefined;
         try {
             const connect = this.options.connectBroker ?? ((opts) => BrokerClient.connect({
                 ...opts,
                 detached: true,
             }));
-            const client = await connect({
+            client = await connect({
                 runtimeDir: this.options.runtimeDir,
                 execPath: this.options.execPath,
                 brokerScript: this.options.brokerScript,
@@ -100,9 +101,10 @@ export class BrokerConnectionProvider implements ConnectionProvider {
             });
             return createBrokerLease(client, lease, request.logger);
         } catch (err) {
+            await client?.close().catch(() => undefined);
             const kind = classifyBrokerFailure(err);
             if (kind === 'fallback') {
-                request.logger.error('Broker unavailable; connecting directly', err);
+                request.logger.error('Shared connection unavailable; connecting directly', err);
                 return this.directProvider.acquire(request);
             }
             throw err;
@@ -116,21 +118,21 @@ function createBrokerLease(
     logger: Log,
 ): ConnectionLease {
     return {
-        exec(cmd, params) {
-            return client.exec(lease.leaseId, lease.identity, cmd, params);
+        exec(cmd, params, options) {
+            return client.exec(lease.leaseId, lease.identity, cmd, params, options);
         },
-        execPartial(cmd, _tester, params) {
-            return client.execPartial(lease.leaseId, lease.identity, cmd, _tester, params);
+        execPartial(cmd, tester, params, options) {
+            return client.execPartial(lease.leaseId, lease.identity, cmd, tester, params, options);
         },
-        async execChannel() {
-            throw new Error('Broker lease execChannel is not implemented yet');
+        execChannel(cmd, options) {
+            return client.execChannel(lease.leaseId, lease.identity, cmd, options);
         },
-        async forwardOut() {
-            throw new Error('Broker lease forwardOut is not implemented yet');
+        forwardOut(srcIP, srcPort, destIP, destPort) {
+            return client.forwardOut(lease.leaseId, lease.identity, srcIP, srcPort, destIP, destPort);
         },
         async addTunnel(config: SSHTunnelConfig): Promise<TunnelHandle> {
             const handle = await client.addTunnel(lease.leaseId, lease.identity, config);
-            return { ...config, name: handle.name, localPort: handle.localPort, server: {} as TunnelHandle['server'] };
+            return { ...config, name: handle.name, localPort: handle.localPort };
         },
         closeTunnel(name?: string) {
             return client.closeTunnel(lease.leaseId, lease.identity, name);
@@ -153,7 +155,7 @@ export type BrokerProviderFactoryOptions = Omit<BrokerConnectionProviderOptions,
 export function brokerProviderForPolicy(options: BrokerProviderFactoryOptions): BrokerConnectionProvider {
     return new BrokerConnectionProvider({
         ...options,
-        identity: `${options.policy.identity.controlPath}|${options.policy.identity.host}|${options.policy.identity.port}|${options.policy.identity.user}`,
+        identity: sharingIdentityKey(options.policy.identity),
         persist: options.policy.persist,
         action: options.policy.action,
     });

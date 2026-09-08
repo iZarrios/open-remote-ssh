@@ -47,4 +47,27 @@ describe('MasterRegistry', () => {
 
         expect(maxInFlight).toBe(2);
     });
+
+    it('rejects a second exclusive creation while the sharing identity is reserved', async () => {
+        const registry = new MasterRegistry();
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+
+        const first = registry.createExclusive('a', async () => {
+            await gate;
+            return createMaster('a', { host: 'h', port: 22, user: 'u' }, { kind: 'immediate' }, fakeConnection());
+        });
+
+        await expect(registry.createExclusive('a', async () => createMaster(
+            'a',
+            { host: 'h', port: 22, user: 'u' },
+            { kind: 'immediate' },
+            fakeConnection(),
+        ))).rejects.toThrow(/occupied/i);
+
+        release();
+        await expect(first).resolves.toMatchObject({ identity: 'a' });
+    });
 });

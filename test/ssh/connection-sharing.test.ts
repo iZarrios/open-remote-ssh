@@ -171,6 +171,22 @@ describe('resolveSharingPolicy', () => {
         });
     });
 
+    it('includes ProxyJump in the %C hash like OpenSSH', () => {
+        const policy = resolveSharingPolicy({
+            ControlMaster: 'auto',
+            ControlPath: '~/.ssh/%C',
+            ProxyJump: 'jump.example:2222',
+        }, destination, linux);
+
+        expect(policy).toMatchObject({
+            sharing: true,
+            identity: {
+                // sha1("testhost.local" + "example.com" + "22" + "alice" + "jump.example:2222")
+                controlPath: '/home/alice/.ssh/b0761cf353bd9efd652bc25fb40fbd59557dafd3',
+            },
+        });
+    });
+
     it('warns and connects directly when ControlPath contains an unsupported token', () => {
         const policy = resolveSharingPolicy({
             ControlMaster: 'auto',

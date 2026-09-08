@@ -77,6 +77,31 @@ describe('BrokerConnectionProvider', () => {
         await lease.close();
         expect(broker.release).toHaveBeenCalledWith('l1', 'shared');
     });
+
+    it('closes the broker control client when acquire fails', async () => {
+        const broker = {
+            acquire: vi.fn(async () => { throw new BrokerAuthError('MFA rejected'); }),
+            close: vi.fn(async () => undefined),
+        } as unknown as BrokerClient;
+        const provider = new BrokerConnectionProvider({
+            connectBroker: async () => broker,
+            runtimeDir: '/tmp/broker',
+            execPath: '/bin/node',
+            brokerScript: '/broker.js',
+            logger: { trace: vi.fn(), info: vi.fn(), error: vi.fn() } as never,
+            identity: 'shared',
+            persist: { kind: 'immediate' },
+            createAuthPromptHandler: () => async () => ({ kind: 'password', password: 'x' }),
+        });
+
+        await expect(provider.acquire({
+            host: 'example.com',
+            port: 22,
+            user: 'alice',
+            logger: { trace: vi.fn(), info: vi.fn(), error: vi.fn() },
+        } as never)).rejects.toThrow('MFA rejected');
+        expect(broker.close).toHaveBeenCalledOnce();
+    });
 });
 
 describe('selectConnectionProvider', () => {

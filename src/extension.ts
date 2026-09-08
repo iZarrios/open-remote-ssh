@@ -33,7 +33,7 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(vscode.commands.registerCommand('openremotessh.openConfigFile', () => openSSHConfigFile()));
     context.subscriptions.push(vscode.commands.registerCommand('openremotessh.showLog', () => logger.show()));
     context.subscriptions.push(vscode.commands.registerCommand('openremotessh.manageSharedConnections', () =>
-        manageSharedConnections(createManageSharedConnectionsDeps({ extensionPath: context.extensionPath }))
+        manageSharedConnections(createManageSharedConnectionsDeps())
     ));
 }
 

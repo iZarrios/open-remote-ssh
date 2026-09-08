@@ -1,13 +1,12 @@
 import * as fs from 'fs';
-import * as net from 'net';
 import * as os from 'os';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { BrokerClient, ProtocolMismatchError } from '../../src/broker/client';
+import { BrokerClient, BrokerRequestError, ProtocolMismatchError } from '../../src/broker/client';
 import { startBroker, type BrokerServer } from '../../src/broker/main';
 import { PROTOCOL_VERSION } from '../../src/broker/protocol';
-import { fakeConnectTransport } from './helpers';
+import { fakeConnection, fakeConnectTransport } from './helpers';
 
 const route = { host: 'example.com', port: 22, user: 'alice' };
 
@@ -80,6 +79,11 @@ describe('BrokerClient', () => {
     it('leaves the running broker alive on protocol mismatch', async () => {
         const runtimeDir = await tempRuntime();
         brokers.push(await startBroker(brokerOptions(runtimeDir)));
+        const keeper = await BrokerClient.connect(clientOptions(runtimeDir));
+        await keeper.acquire({
+            ...acquireOptions('keeper'),
+            persist: { kind: 'indefinite' },
+        });
 
         await expect(BrokerClient.connect({
             ...clientOptions(runtimeDir),
@@ -87,8 +91,11 @@ describe('BrokerClient', () => {
         })).rejects.toBeInstanceOf(ProtocolMismatchError);
 
         const client = await BrokerClient.connect(clientOptions(runtimeDir));
-        await expect(client.request('list')).resolves.toEqual({ masters: [] });
+        await expect(client.request('list')).resolves.toEqual({
+            masters: [expect.objectContaining({ identity: 'keeper' })],
+        });
         await client.close();
+        await keeper.close();
     });
 
     it('serializes acquire for the same identity across two clients', async () => {
@@ -110,25 +117,45 @@ describe('BrokerClient', () => {
         await b.close();
     });
 
+    it('rejects a concurrent exclusive creation for the same identity', async () => {
+        const runtimeDir = await tempRuntime();
+        let allowCreation!: () => void;
+        const creationGate = new Promise<void>((resolve) => {
+            allowCreation = resolve;
+        });
+        let creationStarted!: () => void;
+        const started = new Promise<void>((resolve) => {
+            creationStarted = resolve;
+        });
+        brokers.push(await startBroker(brokerOptions(runtimeDir, {
+            connectTransport: async () => {
+                creationStarted();
+                await creationGate;
+                return fakeConnection();
+            },
+        })));
+        const a = await BrokerClient.connect(clientOptions(runtimeDir));
+        const b = await BrokerClient.connect(clientOptions(runtimeDir));
+
+        const first = a.acquire({ ...acquireOptions('exclusive'), action: 'create' as const });
+        await started;
+        await expect(b.acquire({ ...acquireOptions('exclusive'), action: 'create' as const }))
+            .rejects.toMatchObject<Partial<BrokerRequestError>>({ code: 'occupied' });
+        allowCreation();
+        await first;
+        await a.close();
+        await b.close();
+    });
+
     it('applies backpressure on a broker-owned data socket', async () => {
         const runtimeDir = await tempRuntime();
-        let pausedSocket: net.Socket | undefined;
-        brokers.push(await startBroker({
-            ...brokerOptions(runtimeDir),
-            onStream: (socket) => {
-                pausedSocket = socket;
-                socket.pause();
-            },
-        }));
+        brokers.push(await startBroker(brokerOptions(runtimeDir)));
         const client = await BrokerClient.connect(clientOptions(runtimeDir));
-        const { socketPath } = await client.request('open-stream') as { socketPath: string };
-
-        const data = await new Promise<net.Socket>((resolve, reject) => {
-            const socket = new net.Socket({ highWaterMark: 16 });
-            socket.once('connect', () => resolve(socket));
-            socket.once('error', reject);
-            socket.connect(socketPath);
+        const lease = await client.acquire({
+            ...acquireOptions('streaming'),
+            persist: { kind: 'indefinite' },
         });
+        const data = await client.forwardOut(lease.leaseId, lease.identity, '127.0.0.1', 0, 'example.com', 80);
 
         const payload = Buffer.alloc(256 * 1024, 7);
         const writeOk = data.write(payload);
@@ -140,13 +167,11 @@ describe('BrokerClient', () => {
             data.on('end', () => resolve(Buffer.concat(chunks)));
         });
 
-        pausedSocket!.on('data', (chunk) => pausedSocket!.write(chunk));
-        pausedSocket!.on('end', () => pausedSocket!.end());
-        pausedSocket!.resume();
         data.end();
 
         const echoed = await received;
         expect(echoed.equals(payload)).toBe(true);
+        await client.release(lease.leaseId, lease.identity);
         await client.close();
     });
 });
@@ -168,6 +193,10 @@ describe('broker child process', () => {
             brokerScript: path.join(__dirname, '../../out/broker/main.js'),
             detached: false,
             spawn: (command, args, options) => {
+                expect(options.env).toMatchObject({
+                    ELECTRON_RUN_AS_NODE: '1',
+                    OPEN_REMOTE_SSH_BROKER_RUNTIME: runtimeDir,
+                });
                 const child = spawn(command, args, { ...options, stdio: 'ignore' });
                 children.push(child);
                 return child;

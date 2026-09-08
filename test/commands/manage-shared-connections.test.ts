@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
+import { resolveSharingPolicy, sharingIdentityKey } from '../../src/ssh/sharingPolicy';
 import {
+    configuredSharedHosts,
     manageSharedConnections,
     type ManageSharedConnectionsDeps,
     type SharedConnectionInfo,
@@ -23,11 +25,25 @@ const activeMaster: SharedConnectionInfo = {
     persist: { kind: 'timed', idleSeconds: 90 },
 };
 
+function depsFor(overrides: Partial<ManageSharedConnectionsDeps> = {}): ManageSharedConnectionsDeps {
+    return {
+        list: async () => [
+            { kind: 'active', connection: idleMaster },
+            { kind: 'active', connection: activeMaster },
+        ],
+        close: vi.fn(async () => undefined),
+        openHostInNewWindow: vi.fn(async () => undefined),
+        showQuickPick: async (items) => items[0],
+        showWarningMessage: vi.fn(async () => undefined),
+        showInformationMessage: vi.fn(async () => undefined),
+        ...overrides,
+    };
+}
+
 describe('manageSharedConnections', () => {
     it('lists shared connections and closes an idle master immediately', async () => {
         const close = vi.fn(async () => undefined);
-        const deps: ManageSharedConnectionsDeps = {
-            list: async () => [idleMaster, activeMaster],
+        const deps = depsFor({
             close,
             showQuickPick: async (items) => {
                 expect(items.map((item) => item.label)).toEqual([
@@ -36,9 +52,7 @@ describe('manageSharedConnections', () => {
                 ]);
                 return items[0];
             },
-            showWarningMessage: vi.fn(async () => undefined),
-            showInformationMessage: vi.fn(async () => undefined),
-        };
+        });
 
         await manageSharedConnections(deps);
 
@@ -48,8 +62,8 @@ describe('manageSharedConnections', () => {
 
     it('requires confirmation before closing an active master', async () => {
         const close = vi.fn(async () => undefined);
-        const deps: ManageSharedConnectionsDeps = {
-            list: async () => [activeMaster],
+        const deps = depsFor({
+            list: async () => [{ kind: 'active', connection: activeMaster }],
             close,
             showQuickPick: async (items) => items[0],
             showWarningMessage: async (message, ...actions) => {
@@ -57,8 +71,7 @@ describe('manageSharedConnections', () => {
                 expect(actions).toEqual(['Close Now', 'Close When Idle']);
                 return 'Close Now';
             },
-            showInformationMessage: vi.fn(async () => undefined),
-        };
+        });
 
         await manageSharedConnections(deps);
 
@@ -67,13 +80,12 @@ describe('manageSharedConnections', () => {
 
     it('cancels an active close when the user dismisses confirmation', async () => {
         const close = vi.fn(async () => undefined);
-        const deps: ManageSharedConnectionsDeps = {
-            list: async () => [activeMaster],
+        const deps = depsFor({
+            list: async () => [{ kind: 'active', connection: activeMaster }],
             close,
             showQuickPick: async (items) => items[0],
             showWarningMessage: async () => undefined,
-            showInformationMessage: vi.fn(async () => undefined),
-        };
+        });
 
         await manageSharedConnections(deps);
 
@@ -82,13 +94,12 @@ describe('manageSharedConnections', () => {
 
     it('schedules close-when-idle for an active master', async () => {
         const close = vi.fn(async () => undefined);
-        const deps: ManageSharedConnectionsDeps = {
-            list: async () => [activeMaster],
+        const deps = depsFor({
+            list: async () => [{ kind: 'active', connection: activeMaster }],
             close,
             showQuickPick: async (items) => items[0],
             showWarningMessage: async () => 'Close When Idle',
-            showInformationMessage: vi.fn(async () => undefined),
-        };
+        });
 
         await manageSharedConnections(deps);
 
@@ -96,17 +107,68 @@ describe('manageSharedConnections', () => {
     });
 
     it('shows an info message when there are no shared connections', async () => {
-        const deps: ManageSharedConnectionsDeps = {
+        const deps = depsFor({
             list: async () => [],
-            close: vi.fn(async () => undefined),
             showQuickPick: vi.fn(async () => undefined),
-            showWarningMessage: vi.fn(async () => undefined),
-            showInformationMessage: vi.fn(async () => undefined),
-        };
+        });
 
         await manageSharedConnections(deps);
 
-        expect(deps.showInformationMessage).toHaveBeenCalledWith('No shared SSH connections.');
+        expect(deps.showInformationMessage).toHaveBeenCalledWith('No active or configured shared SSH connections.');
         expect(deps.showQuickPick).not.toHaveBeenCalled();
     });
+
+    it('offers eligible configured hosts that do not have an active master', async () => {
+        const openHostInNewWindow = vi.fn(async () => undefined);
+        const deps = depsFor({
+            list: async () => [
+                { kind: 'active', connection: activeMaster },
+                { kind: 'configured', host: 'devbox', destination: 'alice@devbox.example:22' },
+            ],
+            openHostInNewWindow,
+            showQuickPick: async (items) => {
+                expect(items.map((item) => item.label)).toEqual([
+                    'bob@jump.example:2222',
+                    'devbox',
+                ]);
+                expect(items[1].description).toBe('Start shared connection');
+                return items[1];
+            },
+        });
+
+        await manageSharedConnections(deps);
+
+        expect(openHostInNewWindow).toHaveBeenCalledWith('devbox');
+        expect(deps.close).not.toHaveBeenCalled();
+    });
 });
+
+describe('configuredSharedHosts', () => {
+    it('offers only hosts that can create a currently inactive master', () => {
+        const configs = {
+            auto: { HostName: 'auto.example', User: 'alice', ControlMaster: 'auto', ControlPath: '~/.ssh/%C' },
+            attachOnly: { ControlMaster: 'no', ControlPath: '~/.ssh/%C' },
+            active: { ControlMaster: 'yes', ControlPath: '~/.ssh/%C' },
+            direct: {},
+        };
+        const activePolicy = resolvePolicy(configs.active, 'active', 'local-user');
+        const config = {
+            getAllConfiguredHosts: () => Object.keys(configs),
+            getHostConfiguration: (host: string) => configs[host as keyof typeof configs],
+        };
+
+        expect(configuredSharedHosts(config, new Set([activePolicy]), 'local-user')).toEqual([{
+            kind: 'configured',
+            host: 'auto',
+            destination: 'alice@auto.example:22',
+        }]);
+    });
+});
+
+function resolvePolicy(config: Record<string, string>, host: string, user: string): string {
+    const policy = resolveSharingPolicy(config, { host, port: 22, user });
+    if (!policy.sharing) {
+        throw new Error('expected sharing policy');
+    }
+    return sharingIdentityKey(policy.identity);
+}

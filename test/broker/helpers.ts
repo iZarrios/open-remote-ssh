@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events';
+import { PassThrough } from 'stream';
 import type { AuthDelegate } from '../../src/broker/transport';
 import type SSHConnection from '../../src/ssh/sshConnection';
 
@@ -22,8 +23,20 @@ export function fakeConnection(): FakeTransport {
             }
             return { stdout: 'ok', stderr: '' };
         },
-        execChannel: async () => ({ close() {} }),
-        forwardOut: async () => ({}),
+        execChannel: async () => {
+            const channel = new PassThrough() as PassThrough & { stderr: PassThrough; close(): void };
+            channel.stderr = new PassThrough();
+            channel.close = () => {
+                channel.destroy();
+                channel.stderr.destroy();
+            };
+            return channel;
+        },
+        forwardOut: async () => {
+            const channel = new PassThrough() as PassThrough & { close(): void };
+            channel.close = () => channel.destroy();
+            return channel;
+        },
         addTunnel: async (config: { name?: string }) => ({ ...config, server: {} }),
         closeTunnel: async () => undefined,
         close: async () => undefined,

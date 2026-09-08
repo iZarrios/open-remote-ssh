@@ -8,8 +8,12 @@ This context describes how authenticated SSH connections are owned and shared by
 The component that establishes an authenticated SSH connection and carries its logical channels. The extension's transport remains the `ssh2` library.
 
 **Extension-managed connection sharing**:
-Reuse of an authenticated `ssh2` connection coordinated by extension-owned code. It is distinct from OpenSSH ControlMaster compatibility.
+Reuse of an authenticated `ssh2` connection coordinated by extension-owned code. It is limited to extension consumers and is distinct from native OpenSSH ControlMaster compatibility.
 _Avoid_: ControlMaster support
+
+**Extension consumer**:
+A VS Code or VSCodium extension-host process using a connection lease. Integrated terminals and other processes running native `ssh` are not extension consumers.
+_Avoid_: SSH client, editor terminal
 
 **Connection broker**:
 An on-demand, per-user background process that owns shared SSH transports for multiple extension processes.
@@ -30,3 +34,7 @@ _Avoid_: Control options
 **OpenSSH ControlMaster**:
 OpenSSH's cross-process connection-sharing facility, coordinated through the mux protocol at `ControlPath` and governed by `ControlPersist`.
 _Avoid_: SSH multiplexing
+
+**Native OpenSSH master**:
+An authenticated connection owned by an OpenSSH process and exposed through OpenSSH's mux protocol. It is outside the extension-managed sharing group and cannot share transports with the connection broker.
+_Avoid_: Shared connection

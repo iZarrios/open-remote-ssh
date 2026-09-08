@@ -19,6 +19,12 @@ export type PrepareRuntimeDirOptions = {
     uid: number;
 };
 
+export type PendingDataSocket = {
+    socketPath: string;
+    connected: Promise<net.Socket>;
+    close(): Promise<void>;
+};
+
 export async function prepareRuntimeDir(dir: string, options: PrepareRuntimeDirOptions): Promise<void> {
     let stat: fs.Stats | undefined;
     try {
@@ -48,6 +54,43 @@ export async function bindControlSocket(socketPath: string): Promise<net.Server>
     });
     await fs.promises.chmod(socketPath, 0o600);
     return server;
+}
+
+export async function bindDataSocket(runtimeDir: string, name: string): Promise<PendingDataSocket> {
+    const socketPath = path.join(runtimeDir, name);
+    const server = net.createServer();
+    let accepted: net.Socket | undefined;
+    let resolveConnected!: (socket: net.Socket) => void;
+    let rejectConnected!: (err: Error) => void;
+    const connected = new Promise<net.Socket>((resolve, reject) => {
+        resolveConnected = resolve;
+        rejectConnected = reject;
+    });
+
+    server.once('connection', (socket) => {
+        accepted = socket;
+        server.close();
+        void fs.promises.unlink(socketPath).catch(() => undefined);
+        resolveConnected(socket);
+    });
+    server.once('error', rejectConnected);
+    await new Promise<void>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen({ path: socketPath, exclusive: true }, () => resolve());
+    });
+    await fs.promises.chmod(socketPath, 0o600);
+
+    return {
+        socketPath,
+        connected,
+        async close() {
+            accepted?.destroy();
+            if (server.listening) {
+                await new Promise<void>((resolve) => server.close(() => resolve()));
+            }
+            await fs.promises.unlink(socketPath).catch(() => undefined);
+        },
+    };
 }
 
 async function removeStaleSocket(socketPath: string): Promise<void> {

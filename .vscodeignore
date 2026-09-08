@@ -5,7 +5,6 @@
 !CHANGELOG.md
 !LICENSE.txt
 !README.md
-!lib/extension.js
-!lib/connectionBroker.js
-!resources/icon.png
+!lib/**
+!resources/**
 !src/scripts/**

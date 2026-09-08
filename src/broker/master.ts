@@ -6,6 +6,7 @@ import type { FrozenRoute } from './transport';
 export type BrokerLease = {
     leaseId: string;
     tunnelNames: string[];
+    resources: Array<() => Promise<void> | void>;
 };
 
 export type SharedMaster = {
@@ -42,7 +43,7 @@ export function createMaster(
 }
 
 export function attachLease(master: SharedMaster, leaseId: string): BrokerLease {
-    const lease: BrokerLease = { leaseId, tunnelNames: [] };
+    const lease: BrokerLease = { leaseId, tunnelNames: [], resources: [] };
     master.leases.set(leaseId, lease);
     master.leaseCount += 1;
     master.state = 'ready';
@@ -99,10 +100,18 @@ export function clearIdleTimer(master: SharedMaster): void {
 export async function closeMaster(master: SharedMaster): Promise<void> {
     clearIdleTimer(master);
     master.state = 'closing';
-    await master.connection.close();
-    master.leases.clear();
-    master.leaseCount = 0;
-    master.state = 'failed';
+    const leases = [...master.leases.values()];
+    try {
+        await Promise.allSettled(leases.flatMap((lease) => [
+            ...lease.tunnelNames.map((name) => master.connection.closeTunnel(name)),
+            ...lease.resources.map((close) => close()),
+        ]));
+        await master.connection.close();
+    } finally {
+        master.leases.clear();
+        master.leaseCount = 0;
+        master.state = 'failed';
+    }
 }
 
 export function failMaster(master: SharedMaster): void {
