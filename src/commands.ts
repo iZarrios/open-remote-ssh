@@ -6,19 +6,11 @@ import SSHConfiguration, { getSSHConfigPath } from './ssh/sshConfig';
 import { exists as fileExists } from './common/files';
 import SSHDestination from './ssh/sshDestination';
 import { BrokerClient } from './broker/client';
+import type { MasterSummary } from './broker/registry';
 import { resolveSharingPolicy, sharingIdentityKey, type PersistPolicy } from './ssh/sharingPolicy';
-import {
-    defaultBrokerRuntimeDir,
-} from './ssh/brokerConnectionProvider';
+import { defaultBrokerRuntimeDir } from './ssh/brokerConnectionProvider';
 
-export type SharedConnectionInfo = {
-    identity: string;
-    destination: string;
-    state: string;
-    leaseCount: number;
-    ageMs: number;
-    persist: PersistPolicy;
-};
+export type SharedConnectionInfo = MasterSummary;
 
 export type SharedConnectionListEntry =
     | { kind: 'active'; connection: SharedConnectionInfo }
@@ -154,21 +146,12 @@ export function createManageSharedConnectionsDeps(options: {
 
     return {
         async list() {
-            const [client, config] = await Promise.all([
-                connect(),
-                SSHConfiguration.loadFromFS(),
-            ]);
+            const config = await SSHConfiguration.loadFromFS();
+            const client = await connect();
             let masters: SharedConnectionInfo[];
             try {
                 const result = await client?.list();
-                masters = result?.masters.map((master) => ({
-                    identity: master.identity,
-                    destination: master.destination,
-                    state: master.state,
-                    leaseCount: master.leaseCount,
-                    ageMs: master.ageMs,
-                    persist: master.persist,
-                })) ?? [];
+                masters = result?.masters ?? [];
             } finally {
                 await client?.close();
             }

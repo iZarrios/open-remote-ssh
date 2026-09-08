@@ -1,12 +1,24 @@
 export const PROTOCOL_VERSION = 1;
 
+export type BrokerMethod =
+    | 'list'
+    | 'auth-response'
+    | 'acquire'
+    | 'exec'
+    | 'exec-channel'
+    | 'forward-out'
+    | 'add-tunnel'
+    | 'close-tunnel'
+    | 'release'
+    | 'close';
+
 export type BrokerMessage =
     | { type: 'hello'; version: number }
     | { type: 'hello-ok'; version: number }
     | { type: 'hello-mismatch'; version: number }
-    | { type: 'req'; id: number; method: string; params: unknown }
+    | { type: 'req'; id: number; method: BrokerMethod; params: unknown }
     | { type: 'res'; id: number; result?: unknown; error?: { code: string; message: string } }
-    | { type: 'event'; id?: number; name: string; payload: unknown };
+    | { type: 'event'; id?: number; name: 'auth-prompt'; payload: unknown };
 
 export type AuthPromptMessage = {
     promptId: string;
@@ -50,4 +62,3 @@ export function attachFrameReader(
         }
     });
 }
-

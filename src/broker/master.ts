@@ -85,9 +85,6 @@ export function scheduleIdleExpiry(
 
 export function markCloseWhenIdle(master: SharedMaster): void {
     master.closeWhenIdle = true;
-    if (master.leaseCount === 0) {
-        return;
-    }
 }
 
 export function clearIdleTimer(master: SharedMaster): void {
@@ -112,11 +109,4 @@ export async function closeMaster(master: SharedMaster): Promise<void> {
         master.leaseCount = 0;
         master.state = 'failed';
     }
-}
-
-export function failMaster(master: SharedMaster): void {
-    clearIdleTimer(master);
-    master.state = 'failed';
-    master.leases.clear();
-    master.leaseCount = 0;
 }

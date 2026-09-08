@@ -60,6 +60,7 @@ export async function bindDataSocket(runtimeDir: string, name: string): Promise<
     const socketPath = path.join(runtimeDir, name);
     const server = net.createServer();
     let accepted: net.Socket | undefined;
+    let settled = false;
     let resolveConnected!: (socket: net.Socket) => void;
     let rejectConnected!: (err: Error) => void;
     const connected = new Promise<net.Socket>((resolve, reject) => {
@@ -69,27 +70,38 @@ export async function bindDataSocket(runtimeDir: string, name: string): Promise<
 
     server.once('connection', (socket) => {
         accepted = socket;
+        settled = true;
         server.close();
         void fs.promises.unlink(socketPath).catch(() => undefined);
         resolveConnected(socket);
     });
-    server.once('error', rejectConnected);
+    server.once('error', (err) => {
+        settled = true;
+        rejectConnected(err);
+    });
     await new Promise<void>((resolve, reject) => {
         server.once('error', reject);
         server.listen({ path: socketPath, exclusive: true }, () => resolve());
     });
     await fs.promises.chmod(socketPath, 0o600);
 
+    let closePromise: Promise<void> | undefined;
+    const close = () => closePromise ??= (async () => {
+        accepted?.destroy();
+        if (!settled) {
+            settled = true;
+            rejectConnected(new Error(`Data socket closed before a client connected: ${socketPath}`));
+        }
+        if (server.listening) {
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+        }
+        await fs.promises.unlink(socketPath).catch(() => undefined);
+    })();
+
     return {
         socketPath,
         connected,
-        async close() {
-            accepted?.destroy();
-            if (server.listening) {
-                await new Promise<void>((resolve) => server.close(() => resolve()));
-            }
-            await fs.promises.unlink(socketPath).catch(() => undefined);
-        },
+        close,
     };
 }
 

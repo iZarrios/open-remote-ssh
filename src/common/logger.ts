@@ -4,7 +4,13 @@ import { toString } from '../utils/to-string';
 
 type LogLevel = 'Trace' | 'Info' | 'Error';
 
-export class Log {
+export interface Logger {
+    trace(message: string, data?: unknown): void;
+    info(message: string, data?: unknown): void;
+    error(message: string, data?: unknown): void;
+}
+
+export class Log implements Logger {
     private output: vscode.OutputChannel;
 
     constructor(name: string) {

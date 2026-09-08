@@ -6,15 +6,22 @@ import SSHConnection from '../ssh/sshConnection';
 import { openSshRoute, type HostConfigLookup, type SshAuthHandler } from '../ssh/sshRoute';
 import type { AuthDelegate, FrozenRoute, TransportConnector } from './transport';
 
+const AUTH_RETRY_COUNT = 3;
+
+function writeLog(level: string, message: string, data?: unknown): void {
+    const detail = data === undefined ? '' : ` ${String(data)}`;
+    process.stderr.write(`[${level}] ${message}${detail}\n`);
+}
+
 const logger = {
     trace(message: string, data?: unknown) {
-        process.stderr.write(`[trace] ${message}${data ? ` ${String(data)}` : ''}\n`);
+        writeLog('trace', message, data);
     },
     info(message: string, data?: unknown) {
-        process.stderr.write(`[info] ${message}${data ? ` ${String(data)}` : ''}\n`);
+        writeLog('info', message, data);
     },
     error(message: string, data?: unknown) {
-        process.stderr.write(`[error] ${message}${data ? ` ${String(data)}` : ''}\n`);
+        writeLog('error', message, data);
     },
 };
 
@@ -33,8 +40,8 @@ export const connectSshTransport: TransportConnector = async (_identity, route, 
     const hostConfig = route.hostConfig || {};
     const identityFiles: string[] = (hostConfig['IdentityFile'] as unknown as string[]) || [];
     const identitiesOnly = (hostConfig['IdentitiesOnly'] || 'no').toLowerCase() === 'yes';
-    const identityKeys = await gatherIdentityFiles(identityFiles, route.sshAgentSock, identitiesOnly, logger as never);
-    const preferred = route.preferredAuthentications || ['publickey', 'password', 'keyboard-interactive'];
+    const identityKeys = await gatherIdentityFiles(identityFiles, route.sshAgentSock, identitiesOnly, logger);
+    const preferredAuthentications = route.preferredAuthentications || ['publickey', 'password', 'keyboard-interactive'];
 
     const request = {
         sshConfig: frozenHostConfigLookup(route),
@@ -46,15 +53,15 @@ export const connectSshTransport: TransportConnector = async (_identity, route, 
         connectTimeoutMs: route.connectTimeoutMs || 60_000,
         enableAgentForwarding: route.enableAgentForwarding || false,
         sshAgentSock: route.sshAgentSock,
-        preferredAuthentications: preferred,
+        preferredAuthentications,
         createAuthHandler: (user: string, host: string, keys: typeof identityKeys, authentications: string[]) =>
             createBrokerAuthHandler(auth, user, host, keys, authentications, route.sshAgentSock),
-        logger: logger as never,
+        logger,
     };
 
     const opened = await openSshRoute(request);
     try {
-        const authHandler = request.createAuthHandler(route.user, route.host, identityKeys, preferred);
+        const authHandler = request.createAuthHandler(route.user, route.host, identityKeys, preferredAuthentications);
         const connection = new SSHConnection({
             host: opened.host,
             port: opened.port,
@@ -75,8 +82,11 @@ export const connectSshTransport: TransportConnector = async (_identity, route, 
         await connection.connect();
         const close = connection.close.bind(connection);
         connection.close = async () => {
-            await close();
-            opened.dispose();
+            try {
+                await close();
+            } finally {
+                opened.dispose();
+            }
         };
         return connection;
     } catch (err) {
@@ -93,8 +103,8 @@ export function createBrokerAuthHandler(
     preferredAuthentications: string[],
     sshAgentSock?: string,
 ): SshAuthHandler {
-    let passwordRetryCount = 3;
-    let keyboardRetryCount = 3;
+    let passwordRetryCount = AUTH_RETRY_COUNT;
+    let keyboardRetryCount = AUTH_RETRY_COUNT;
     const keys = identityKeys.slice();
     return async (methodsLeft, _partialSuccess, callback) => {
         if (methodsLeft === null) {

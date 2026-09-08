@@ -1,7 +1,7 @@
 import * as cp from 'child_process';
 import * as stream from 'stream';
 import * as ssh2 from 'ssh2';
-import { Log } from '../common/logger';
+import type { Logger } from '../common/logger';
 import { isWindows } from '../common/platform';
 import { gatherIdentityFiles, SSHKey } from './identityFiles';
 import { HostConfiguration } from './sshConfig';
@@ -37,7 +37,7 @@ export type OpenSshRouteRequest = {
     sshAgentSock?: string;
     preferredAuthentications: string[];
     createAuthHandler: AuthHandlerFactory;
-    logger: Log;
+    logger: Logger;
 };
 
 export type OpenedSshRoute = {

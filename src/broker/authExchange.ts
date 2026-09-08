@@ -9,12 +9,6 @@ export type AcquireParams = {
     action?: SharingAction;
 };
 
-export type AcquireResult = {
-    leaseId: string;
-    identity: string;
-    state: string;
-};
-
 export type AuthPromptEvent = {
     acquireId: number;
     promptId: string;
@@ -27,17 +21,24 @@ export class AuthExchange {
         reject: (err: Error) => void;
     }>();
 
-    createPrompt(acquireId: number, prompt: AuthPrompt): AuthPromptEvent {
-        return {
+    request(
+        acquireId: number,
+        prompt: AuthPrompt,
+        emit: (event: AuthPromptEvent) => void,
+    ): Promise<AuthResponse> {
+        const event = {
             acquireId,
             promptId: randomUUID(),
             prompt,
         };
-    }
-
-    waitForResponse(promptId: string): Promise<AuthResponse> {
-        return new Promise((resolve, reject) => {
-            this.waiters.set(promptId, { resolve, reject });
+        return new Promise<AuthResponse>((resolve, reject) => {
+            this.waiters.set(event.promptId, { resolve, reject });
+            try {
+                emit(event);
+            } catch (err) {
+                this.waiters.delete(event.promptId);
+                reject(err);
+            }
         });
     }
 
@@ -65,9 +66,7 @@ export function authDelegateForExchange(
     emit: (event: AuthPromptEvent) => void,
 ) {
     async function prompt(prompt: AuthPrompt): Promise<AuthResponse> {
-        const event = exchange.createPrompt(acquireId, prompt);
-        emit(event);
-        return exchange.waitForResponse(event.promptId);
+        return exchange.request(acquireId, prompt, emit);
     }
 
     return {

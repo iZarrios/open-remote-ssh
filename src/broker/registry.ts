@@ -1,7 +1,7 @@
 import type { PersistPolicy } from '../ssh/sharingPolicy';
 import type { SharedMaster } from './master';
 
-export type MasterState = 'creating' | 'authenticating' | 'ready' | 'idle' | 'closing' | 'failed';
+export type MasterState = 'ready' | 'idle' | 'closing' | 'failed';
 
 export type MasterSummary = {
     identity: string;
@@ -12,17 +12,13 @@ export type MasterSummary = {
     persist: PersistPolicy;
 };
 
-export function formatMasterDestination(master: SharedMaster): string {
-    const { user, host, port } = master.route;
-    return `${user}@${host}:${port}`;
-}
-
 export function summarizeMaster(master: SharedMaster, now: number = Date.now()): MasterSummary {
+    const { user, host, port } = master.route;
     return {
         identity: master.identity,
         state: master.state,
         leaseCount: master.leaseCount,
-        destination: formatMasterDestination(master),
+        destination: `${user}@${host}:${port}`,
         ageMs: Math.max(0, now - master.createdAt),
         persist: master.persist,
     };
@@ -50,17 +46,7 @@ export class MasterRegistry {
             return inflight;
         }
 
-        const pending = create().then((record) => {
-            this.masters.set(identity, record);
-            this.creating.delete(identity);
-            return record;
-        }, (err) => {
-            this.creating.delete(identity);
-            throw err;
-        });
-
-        this.creating.set(identity, pending);
-        return pending;
+        return this.trackCreation(identity, create);
     }
 
     createExclusive(identity: string, create: () => Promise<SharedMaster>): Promise<SharedMaster> {
@@ -69,16 +55,7 @@ export class MasterRegistry {
             return Promise.reject(new SharingIdentityOccupiedError(identity));
         }
 
-        const pending = create().then((record) => {
-            this.masters.set(identity, record);
-            this.creating.delete(identity);
-            return record;
-        }, (err) => {
-            this.creating.delete(identity);
-            throw err;
-        });
-        this.creating.set(identity, pending);
-        return pending;
+        return this.trackCreation(identity, create);
     }
 
     list(now: number = Date.now()): MasterSummary[] {
@@ -98,6 +75,17 @@ export class MasterRegistry {
 
     get size(): number {
         return this.masters.size;
+    }
+
+    private trackCreation(identity: string, create: () => Promise<SharedMaster>): Promise<SharedMaster> {
+        const pending = create().then((master) => {
+            this.masters.set(identity, master);
+            return master;
+        }).finally(() => {
+            this.creating.delete(identity);
+        });
+        this.creating.set(identity, pending);
+        return pending;
     }
 }
 

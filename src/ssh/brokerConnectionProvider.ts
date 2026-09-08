@@ -1,6 +1,6 @@
 import * as os from 'os';
 import * as path from 'path';
-import { Log } from '../common/logger';
+import type { Logger } from '../common/logger';
 import {
     BrokerAuthError,
     BrokerClient,
@@ -63,7 +63,7 @@ export type BrokerConnectionProviderOptions = {
     identity: string;
     persist: PersistPolicy;
     action?: SharingAction;
-    logger: Log;
+    logger: Logger;
     directProvider?: ConnectionProvider;
     connectBroker?: (options: {
         runtimeDir: string;
@@ -115,7 +115,7 @@ export class BrokerConnectionProvider implements ConnectionProvider {
 function createBrokerLease(
     client: BrokerClient,
     lease: { leaseId: string; identity: string },
-    logger: Log,
+    logger: Logger,
 ): ConnectionLease {
     return {
         exec(cmd, params, options) {

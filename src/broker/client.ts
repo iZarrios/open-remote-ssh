@@ -2,7 +2,7 @@ import { spawn, type ChildProcess, type SpawnOptions } from 'child_process';
 import * as net from 'net';
 import type { ClientChannel, ExecOptions } from 'ssh2';
 import type { PersistPolicy, SharingAction } from '../ssh/sharingPolicy';
-import { attachFrameReader, encodeFrame, PROTOCOL_VERSION, type BrokerMessage } from './protocol';
+import { attachFrameReader, encodeFrame, PROTOCOL_VERSION, type BrokerMessage, type BrokerMethod } from './protocol';
 import { controlSocketPath } from './runtime';
 import type { AuthPrompt, AuthResponse, FrozenRoute } from './transport';
 
@@ -60,13 +60,18 @@ export type AcquireLease = {
     state: string;
 };
 
+type PendingRequest = {
+    resolve: (value: unknown) => void;
+    reject: (err: Error) => void;
+    onAuthPrompt?: (prompt: AuthPrompt) => Promise<AuthResponse>;
+};
+
+type ExecResult = { stdout: string; stderr: string };
+type DataSocketResult = { socketPath: string };
+
 export class BrokerClient {
     private nextId = 1;
-    private readonly pending = new Map<number, {
-        resolve: (value: unknown) => void;
-        reject: (err: Error) => void;
-        onAuthPrompt?: (prompt: AuthPrompt) => Promise<AuthResponse>;
-    }>();
+    private readonly pending = new Map<number, PendingRequest>();
     private helloWaiter: {
         resolve: () => void;
         reject: (err: Error) => void;
@@ -85,8 +90,11 @@ export class BrokerClient {
         let socket = await tryConnect(socketPath);
 
         if (!socket) {
-            launchBroker(options);
-            socket = await waitForConnect(socketPath, timeoutMs);
+            const child = launchBroker(options);
+            socket = await Promise.race([
+                waitForConnect(socketPath, timeoutMs),
+                new Promise<never>((_resolve, reject) => child.once('error', reject)),
+            ]);
         }
 
         const client = new BrokerClient(socket);
@@ -114,10 +122,10 @@ export class BrokerClient {
         }
     }
 
-    request(method: string, params: unknown = {}): Promise<unknown> {
+    request<T = unknown>(method: BrokerMethod, params: unknown = {}): Promise<T> {
         const id = this.nextId++;
-        return new Promise((resolve, reject) => {
-            this.pending.set(id, { resolve, reject });
+        return new Promise<T>((resolve, reject) => {
+            this.pending.set(id, { resolve: (value) => resolve(value as T), reject });
             this.socket.write(encodeFrame({ type: 'req', id, method, params }));
         });
     }
@@ -148,8 +156,8 @@ export class BrokerClient {
         return this.request('release', { leaseId, identity }).then(() => undefined);
     }
 
-    exec(leaseId: string, identity: string, cmd: string, params?: Array<string>, options?: ExecOptions): Promise<{ stdout: string; stderr: string }> {
-        return this.request('exec', { leaseId, identity, cmd, params, options }) as Promise<{ stdout: string; stderr: string }>;
+    exec(leaseId: string, identity: string, cmd: string, params?: Array<string>, options?: ExecOptions): Promise<ExecResult> {
+        return this.request<ExecResult>('exec', { leaseId, identity, cmd, params, options });
     }
 
     execPartial(
@@ -159,7 +167,7 @@ export class BrokerClient {
         tester: (stdout: string, stderr: string) => boolean,
         params?: Array<string>,
         options?: ExecOptions,
-    ): Promise<{ stdout: string; stderr: string }> {
+    ): Promise<ExecResult> {
         const command = cmd + (Array.isArray(params) ? ` ${params.join(' ')}` : '');
         return this.execChannel(leaseId, identity, command, options).then((channel) => new Promise((resolve, reject) => {
             let stdout = '';
@@ -196,10 +204,10 @@ export class BrokerClient {
         cmd: string,
         options?: ExecOptions,
     ): Promise<ClientChannel> {
-        const result = await this.request('exec-channel', { leaseId, identity, cmd, options }) as {
+        const result = await this.request<{
             socketPath: string;
             stderrSocketPath: string;
-        };
+        }>('exec-channel', { leaseId, identity, cmd, options });
         const [channelSocket, stderrSocket] = await Promise.all([
             connectDataSocket(result.socketPath),
             connectDataSocket(result.stderrSocketPath),
@@ -224,14 +232,14 @@ export class BrokerClient {
         destIP: string,
         destPort: number,
     ): Promise<ClientChannel> {
-        const result = await this.request('forward-out', {
+        const result = await this.request<DataSocketResult>('forward-out', {
             leaseId,
             identity,
             srcIP,
             srcPort,
             destIP,
             destPort,
-        }) as { socketPath: string };
+        });
         const socket = await connectDataSocket(result.socketPath);
         Object.defineProperties(socket, {
             close: { value: () => socket.destroy() },
@@ -241,7 +249,7 @@ export class BrokerClient {
     }
 
     addTunnel(leaseId: string, identity: string, config: unknown): Promise<{ name: string; localPort?: number }> {
-        return this.request('add-tunnel', { leaseId, identity, config }) as Promise<{ name: string; localPort?: number }>;
+        return this.request<{ name: string; localPort?: number }>('add-tunnel', { leaseId, identity, config });
     }
 
     closeTunnel(leaseId: string, identity: string, name?: string): Promise<void> {
@@ -249,15 +257,18 @@ export class BrokerClient {
     }
 
     list(): Promise<{ masters: import('./registry').MasterSummary[] }> {
-        return this.request('list') as Promise<{ masters: import('./registry').MasterSummary[] }>;
+        return this.request<{ masters: import('./registry').MasterSummary[] }>('list');
     }
 
     closeMaster(identity: string, options: { whenIdle?: boolean } = {}): Promise<{ closed: boolean; whenIdle?: boolean }> {
-        return this.request('close', { identity, whenIdle: options.whenIdle }) as Promise<{ closed: boolean; whenIdle?: boolean }>;
+        return this.request<{ closed: boolean; whenIdle?: boolean }>('close', { identity, whenIdle: options.whenIdle });
     }
 
     close(): Promise<void> {
         this.rejectAll(new Error('Broker client closed'));
+        if (this.socket.destroyed) {
+            return Promise.resolve();
+        }
         return new Promise((resolve) => {
             this.socket.end(() => resolve());
         });
@@ -340,7 +351,7 @@ export class BrokerClient {
     }
 }
 
-function launchBroker(options: ConnectBrokerOptions): void {
+function launchBroker(options: ConnectBrokerOptions): ChildProcess {
     const spawnFn = options.spawn ?? spawn;
     const child = spawnFn(options.execPath, [options.brokerScript], {
         detached: options.detached ?? true,
@@ -354,6 +365,7 @@ function launchBroker(options: ConnectBrokerOptions): void {
     if (options.detached ?? true) {
         child.unref();
     }
+    return child;
 }
 
 function tryConnect(socketPath: string): Promise<net.Socket | undefined> {

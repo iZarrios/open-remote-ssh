@@ -1,6 +1,7 @@
 import * as net from 'net';
 import { randomUUID } from 'crypto';
-import { attachFrameReader, encodeFrame, PROTOCOL_VERSION, type BrokerMessage } from './protocol';
+import type { ClientChannel } from 'ssh2';
+import { attachFrameReader, encodeFrame, PROTOCOL_VERSION, type BrokerMessage, type BrokerMethod } from './protocol';
 import { AuthExchange, authDelegateForExchange, type AcquireParams } from './authExchange';
 import {
     attachLease,
@@ -12,7 +13,7 @@ import {
     type SharedMaster,
 } from './master';
 import { MasterRegistry, SharingIdentityOccupiedError, defaultPersist } from './registry';
-import { bindControlSocket, bindDataSocket, controlSocketPath, prepareRuntimeDir, RuntimeSecurityError } from './runtime';
+import { bindControlSocket, bindDataSocket, controlSocketPath, prepareRuntimeDir, RuntimeSecurityError, type PendingDataSocket } from './runtime';
 import type { AuthResponse, TransportConnector } from './transport';
 import { connectSshTransport } from './sshTransport';
 
@@ -35,6 +36,16 @@ export type StartBrokerOptions = {
     protocolVersion?: number;
     connectTransport?: TransportConnector;
     schedule?: (delayMs: number, fn: () => void) => ReturnType<typeof setTimeout>;
+};
+
+type BrokerContext = {
+    version: number;
+    runtimeDir: string;
+    registry: MasterRegistry;
+    connectTransport: TransportConnector;
+    schedule: (delayMs: number, fn: () => void) => ReturnType<typeof setTimeout>;
+    onRegistryChange: () => void;
+    onClientClose: () => void;
 };
 
 export async function startBroker(options: StartBrokerOptions): Promise<BrokerServer> {
@@ -92,15 +103,7 @@ export async function startBroker(options: StartBrokerOptions): Promise<BrokerSe
 
 function handleClient(
     socket: net.Socket,
-    context: {
-        version: number;
-        runtimeDir: string;
-        registry: MasterRegistry;
-        connectTransport: TransportConnector;
-        schedule: (delayMs: number, fn: () => void) => ReturnType<typeof setTimeout>;
-        onRegistryChange: () => void;
-        onClientClose: () => void;
-    },
+    context: BrokerContext,
 ): void {
     let helloDone = false;
     let clientClosed = false;
@@ -146,12 +149,7 @@ function handleClient(
         }
         await Promise.allSettled(lease.tunnelNames.map((tunnelName) => master.connection.closeTunnel(tunnelName)));
         await Promise.allSettled(lease.resources.map((close) => close()));
-        scheduleIdleExpiry(master, () => {
-            void closeMaster(master).finally(() => {
-                context.registry.delete(identity, master);
-                context.onRegistryChange();
-            });
-        }, context.schedule);
+        scheduleMasterExpiry(context, identity, master);
     }
 
     async function handleMessage(message: BrokerMessage): Promise<void> {
@@ -182,7 +180,7 @@ function handleClient(
         }
     }
 
-    async function dispatch(method: string, params: unknown, requestId: number): Promise<unknown> {
+    async function dispatch(method: BrokerMethod, params: unknown, requestId: number): Promise<unknown> {
         switch (method) {
             case 'list':
                 return { masters: context.registry.list() };
@@ -223,10 +221,7 @@ function handleClient(
                         if (created.state === 'closing' || created.state === 'failed') {
                             return;
                         }
-                        void closeMaster(created).finally(() => {
-                            context.registry.delete(acquire.identity, created);
-                            context.onRegistryChange();
-                        });
+                        void closeRegisteredMaster(context, acquire.identity, created);
                     });
                     return created;
                 };
@@ -234,12 +229,7 @@ function handleClient(
                     ? await context.registry.createExclusive(acquire.identity, create)
                     : await context.registry.getOrCreate(acquire.identity, create);
                 if (clientClosed) {
-                    scheduleIdleExpiry(master, () => {
-                        void closeMaster(master).finally(() => {
-                            context.registry.delete(acquire.identity, master);
-                            context.onRegistryChange();
-                        });
-                    }, context.schedule);
+                    scheduleMasterExpiry(context, acquire.identity, master);
                     throw new BrokerDispatchError('client', 'Client disconnected during acquire');
                 }
                 const leaseId = randomUUID();
@@ -247,8 +237,7 @@ function handleClient(
                 ownedLeases.set(leaseId, { identity: master.identity, leaseId });
                 return { leaseId, identity: master.identity, state: master.state };
             }
-            case 'exec':
-            case 'exec-partial': {
+            case 'exec': {
                 const { identity, leaseId, cmd, params: execParams, options } = params as {
                     identity: string;
                     leaseId: string;
@@ -270,22 +259,23 @@ function handleClient(
                 const channel = await master.connection.execChannel(cmd, options);
                 const token = randomUUID();
                 const dataEndpoint = await bindDataSocket(context.runtimeDir, `channel-${token}.sock`);
-                const stderrEndpoint = await bindDataSocket(context.runtimeDir, `channel-${token}-stderr.sock`);
-                const close = async () => {
+                let stderrEndpoint: PendingDataSocket;
+                try {
+                    stderrEndpoint = await bindDataSocket(context.runtimeDir, `channel-${token}-stderr.sock`);
+                } catch (err) {
                     channel.close();
-                    await Promise.all([dataEndpoint.close(), stderrEndpoint.close()]);
-                };
-                master.leases.get(leaseId)?.resources.push(close);
-                void dataEndpoint.connected.then((dataSocket) => {
-                    dataSocket.pipe(channel);
-                    channel.pipe(dataSocket);
-                    dataSocket.once('close', () => channel.close());
-                    channel.once('close', () => dataSocket.destroy());
+                    void dataEndpoint.connected.catch(() => undefined);
+                    await dataEndpoint.close();
+                    throw err;
+                }
+                const closeEndpoints = () => Promise.all([dataEndpoint.close(), stderrEndpoint.close()]);
+                addLeaseResource(master, leaseId, async () => {
+                    channel.close();
+                    await closeEndpoints();
                 });
-                void stderrEndpoint.connected.then((stderrSocket) => {
-                    channel.stderr.pipe(stderrSocket);
-                    channel.once('close', () => stderrSocket.destroy());
-                });
+                connectDuplexEndpoint(dataEndpoint, channel);
+                connectReadableEndpoint(stderrEndpoint, channel.stderr, channel);
+                channel.once('close', () => void closeEndpoints());
                 return {
                     socketPath: dataEndpoint.socketPath,
                     stderrSocketPath: stderrEndpoint.socketPath,
@@ -302,18 +292,19 @@ function handleClient(
                 };
                 const master = requireActiveLease(context.registry, identity, leaseId);
                 const channel = await master.connection.forwardOut(srcIP, srcPort, destIP, destPort);
-                const endpoint = await bindDataSocket(context.runtimeDir, `forward-${randomUUID()}.sock`);
-                const close = async () => {
+                let endpoint: PendingDataSocket;
+                try {
+                    endpoint = await bindDataSocket(context.runtimeDir, `forward-${randomUUID()}.sock`);
+                } catch (err) {
+                    channel.close();
+                    throw err;
+                }
+                addLeaseResource(master, leaseId, async () => {
                     channel.close();
                     await endpoint.close();
-                };
-                master.leases.get(leaseId)?.resources.push(close);
-                void endpoint.connected.then((dataSocket) => {
-                    dataSocket.pipe(channel);
-                    channel.pipe(dataSocket);
-                    dataSocket.once('close', () => channel.close());
-                    channel.once('close', () => dataSocket.destroy());
                 });
+                connectDuplexEndpoint(endpoint, channel);
+                channel.once('close', () => void endpoint.close());
                 return { socketPath: endpoint.socketPath };
             }
             case 'add-tunnel': {
@@ -346,22 +337,60 @@ function handleClient(
                 }
                 if (whenIdle) {
                     markCloseWhenIdle(master);
-                    scheduleIdleExpiry(master, () => {
-                        void closeMaster(master).finally(() => {
-                            context.registry.delete(masterIdentity, master);
-                            context.onRegistryChange();
-                        });
-                    }, context.schedule);
+                    scheduleMasterExpiry(context, masterIdentity, master);
                     return { closed: false, whenIdle: true };
                 }
-                await closeMaster(master);
-                context.registry.delete(masterIdentity, master);
-                context.onRegistryChange();
+                await closeRegisteredMaster(context, masterIdentity, master);
                 return { closed: true };
             }
             default:
                 throw new Error(`Unknown method ${method}`);
         }
+    }
+}
+
+function addLeaseResource(master: SharedMaster, leaseId: string, close: () => Promise<void> | void): void {
+    master.leases.get(leaseId)!.resources.push(close);
+}
+
+function connectDuplexEndpoint(endpoint: PendingDataSocket, channel: ClientChannel): void {
+    void endpoint.connected.then((socket) => {
+        socket.pipe(channel);
+        channel.pipe(socket);
+        socket.once('close', () => channel.close());
+        channel.once('close', () => socket.destroy());
+    }).catch(() => undefined);
+}
+
+function connectReadableEndpoint(
+    endpoint: PendingDataSocket,
+    readable: NodeJS.ReadableStream,
+    channel: ClientChannel,
+): void {
+    void endpoint.connected.then((socket) => {
+        readable.pipe(socket);
+        channel.once('close', () => socket.destroy());
+    }).catch(() => undefined);
+}
+
+function scheduleMasterExpiry(context: BrokerContext, identity: string, master: SharedMaster): void {
+    scheduleIdleExpiry(
+        master,
+        () => void closeRegisteredMaster(context, identity, master),
+        context.schedule,
+    );
+}
+
+async function closeRegisteredMaster(
+    context: Pick<BrokerContext, 'registry' | 'onRegistryChange'>,
+    identity: string,
+    master: SharedMaster,
+): Promise<void> {
+    try {
+        await closeMaster(master);
+    } finally {
+        context.registry.delete(identity, master);
+        context.onRegistryChange();
     }
 }
 
